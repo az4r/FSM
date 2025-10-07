@@ -1,0 +1,212 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Draft, Arch, ArchProfile
+from FreeCAD import Vector
+from PySide import QtGui
+import os, sys, re
+
+# --- USTAWIENIA ---
+tolerance = 100.0        # tolerancja długości w mm
+
+# --- aktywacja A2Plus ---
+Gui.activateWorkbench("A2plusWorkbench")
+a2p_path = os.path.join(App.getUserAppDataDir(), "Mod", "A2plus")
+if a2p_path not in sys.path:
+    sys.path.append(a2p_path)
+import a2p_importpart
+
+doc = App.ActiveDocument
+if not doc:
+    raise RuntimeError("Brak aktywnego dokumentu. Zapisz plik przed uruchomieniem.")
+
+if not doc.FileName:
+    App.Console.PrintError("Zapisz dokument, aby znać katalog roboczy.\n")
+    raise RuntimeError
+base_dir   = os.path.dirname(doc.FileName)
+single_dir = os.path.join(base_dir, "SINGLE")
+os.makedirs(single_dir, exist_ok=True)
+
+# --- 1) Wypalanie Placementu zaznaczonych linii ---
+selection = Gui.Selection.getSelection()
+if not selection:
+    App.Console.PrintError("Nie zaznaczono żadnych obiektów.\n")
+    raise ValueError
+
+processed_lines = []
+for obj in selection:
+    if not hasattr(obj, "Shape") or len(obj.Shape.Vertexes) < 2:
+        print(f"Pomijam {obj.Label} – brak geometrii lub to nie jest linia.")
+        continue
+
+    # przeniesienie z kontenera
+    if hasattr(obj, "getParentGroup"):
+        parent = obj.getParentGroup()
+        if parent:
+            parent.removeObject(obj)
+            doc.addObject(obj)
+
+    # globalne punkty
+    p1_global = obj.Shape.Vertexes[0].Point
+    p2_global = obj.Shape.Vertexes[1].Point
+
+    # wypalenie Placementu
+    obj.Points = [p1_global, p2_global]
+    obj.Placement = App.Placement()
+
+    # --- OŚ Z WZDŁUŻ LINII ---
+    axis_z = (p2_global - p1_global).normalize()
+    helper = App.Vector(1,0,0) if abs(axis_z.dot(App.Vector(0,0,1))) > 0.99 else App.Vector(0,0,1)
+    axis_x = helper.cross(axis_z).normalize()
+    axis_y = axis_z.cross(axis_x).normalize()
+
+    rot_new = App.Rotation(axis_x, axis_y, axis_z)
+    base_new = p1_global
+
+    pl_new = App.Placement(base_new, rot_new)
+    ipl_new = pl_new.inverse()
+    p1_local_new = ipl_new.multVec(p1_global)
+    p2_local_new = ipl_new.multVec(p2_global)
+
+    obj.Points = [p1_local_new, p2_local_new]
+    obj.Placement = pl_new
+
+    # zapamiętujemy początek linii
+    processed_lines.append({'obj': obj, 'p_start': p1_global})
+
+doc.recompute()
+print("Wypalono Placement i ustawiono oś Z wzdłuż linii dla zaznaczonych obiektów.")
+
+# --- 2) Grupowanie po długości ---
+all_lines = []
+for rec in processed_lines:
+    obj = rec['obj']
+    try:
+        length_val = float(getattr(obj, "Length", obj.Shape.Length))
+        all_lines.append((obj, length_val))
+    except:
+        pass
+
+groups = []
+while all_lines:
+    base_obj, base_len = all_lines.pop(0)
+    group = [(base_obj, base_len)]
+    rest = []
+    for obj, length in all_lines:
+        if abs(length - base_len) <= tolerance:
+            group.append((obj, length))
+        else:
+            rest.append((obj, length))
+    groups.append(group)
+    all_lines = rest
+
+App.Console.PrintMessage(f"Znaleziono {len(groups)} grup długości.\n")
+
+# --- 3) Prefiksowanie ---
+pat = re.compile(r"^(\d{4})_(\d{3})$")
+used_prefixes = set()
+used_labels = set()
+for o in doc.Objects:
+    m = pat.match(o.Label)
+    if m:
+        used_prefixes.add(int(m.group(1)))
+        used_labels.add(o.Label)
+
+# --- 3a) Dodajemy prefiksy z istniejących plików SINGLE ---
+for fname in os.listdir(single_dir):
+    if fname.endswith(".FCStd"):
+        try:
+            pref = int(os.path.splitext(fname)[0])
+            used_prefixes.add(pref)
+        except:
+            pass
+
+start_num, ok = QtGui.QInputDialog.getInt(
+    None, "Prefiks początkowy",
+    "Podaj czterocyfrowy prefiks startowy (np. 1000):",
+    1000, 0, 9999, 1
+)
+if not ok:
+    App.Console.PrintMessage("Anulowano operację.\n")
+    raise ValueError
+
+current_prefix_num = start_num
+
+# --- 4) Tworzenie plików SINGLE i wstawianie profili ---
+for group_idx, group in enumerate(groups, start=1):
+    objs = [g[0] for g in group]
+    length_val = group[0][1]
+    rounded_length = round(length_val / 100.0) * 100.0
+
+    while current_prefix_num in used_prefixes or f"{current_prefix_num:04d}_001" in used_labels:
+        current_prefix_num += 1
+        if current_prefix_num > 9999:
+            App.Console.PrintError("Brak wolnych prefiksów.\n")
+            raise ValueError
+
+    prefix_str = f"{current_prefix_num:04d}"
+    used_prefixes.add(current_prefix_num)
+
+    for idx, obj in enumerate(objs, start=1):
+        obj.Label = f"{prefix_str}_{idx:03d}"
+        used_labels.add(obj.Label)
+
+    App.Console.PrintMessage(f"Grupa {group_idx}: prefiks {prefix_str}, {len(objs)} elementów, dł. ~{length_val:.1f} mm\n")
+
+    tmp_doc = App.newDocument(f"TmpSingle_{prefix_str}")
+    p0 = Vector(0, 0, 0)
+    p1 = Vector(0, 0, rounded_length)
+    l = Draft.makeLine(p0, p1)
+    tmp_doc.recompute()
+
+    profile = ArchProfile.makeProfile()
+    profile.Placement.Base = (p0 + p1) * 0.5
+    tmp_doc.recompute()
+
+    frame = Arch.makeFrame(l, profile)
+    tmp_doc.recompute()
+
+    out_file = os.path.join(single_dir, f"{prefix_str}.FCStd")
+    tmp_doc.saveAs(out_file)
+    App.closeDocument(tmp_doc.Name)
+
+    for obj in objs:
+        obj_label  = obj.Label
+        prefix     = obj_label.split("_")[0]
+
+        rec = next((r for r in processed_lines if r['obj'] == obj), None)
+        if rec is None:
+            App.Console.PrintError(f"{obj_label}: brak zapisanego punktu początkowego, pomijam.\n")
+            continue
+
+        p_start_global = rec['p_start']
+        line_pl = obj.Placement
+
+        file_fc = os.path.join(single_dir, f"{prefix}.FCStd")
+        if not os.path.exists(file_fc):
+            App.Console.PrintError(f"Nie znaleziono {file_fc}, pomijam {obj_label}.\n")
+            continue
+
+        doc.removeObject(obj.Name)
+        doc.recompute()
+
+        root = a2p_importpart.importPartFromFile(doc, file_fc)
+        part_obj = root
+        for c in getattr(root, "OutList", []):
+            if getattr(c, "Shape", None) and not c.Shape.isNull():
+                part_obj = c
+                break
+
+        # --- Przeniesienie lokalnego (0,0,0) profilu do punktu początkowego linii ---
+        origin_local = Vector(0,0,0)
+        origin_global_after_rot = line_pl.Rotation.multVec(origin_local)
+        delta = p_start_global - (line_pl.Base + origin_global_after_rot)
+
+        part_obj.Placement = App.Placement(line_pl.Base + delta, line_pl.Rotation)
+        doc.recompute()
+
+        App.Console.PrintMessage(f"Wstawiono {prefix}.FCStd zamiast {obj_label}\n")
+
+    current_prefix_num += 1
+
+Gui.activateWorkbench("ArchWorkbench")
+App.Console.PrintMessage("Gotowe – wypalono Placement (oś Z wzdłuż linii) i ustawiono lokalny punkt (0,0,0) profilu w punkcie początkowym linii.\n")

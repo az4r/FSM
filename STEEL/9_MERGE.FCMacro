@@ -1,0 +1,142 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os
+
+doc = App.ActiveDocument
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise Exception("Zaznacz co najmniej jeden element do porównania.")
+
+SINGLE_DIR = os.path.join(doc.FileName and os.path.dirname(doc.FileName) or "", "SINGLE")
+
+# --- Funkcje pomocnicze ---
+
+def get_source_file(obj):
+    """Zwraca wartość właściwości odpowiadającej 'source File'."""
+    for prop in obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            return getattr(obj, prop)
+    for attr in ("FileName", "Filename", "file_name"):
+        if hasattr(obj, attr):
+            return getattr(obj, attr)
+    return None
+
+def set_source_file_direct(obj, path):
+    """Ustawia właściwość odpowiadającą 'source File'."""
+    for prop in obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            setattr(obj, prop, path)
+            return True
+    for attr in ("FileName", "Filename", "file_name"):
+        if hasattr(obj, attr):
+            setattr(obj, attr, path)
+            return True
+    return False
+
+def get_file_for_object(obj):
+    sf = get_source_file(obj)
+    if sf and os.path.isfile(sf):
+        return sf
+    parts = obj.Label.split("_")
+    if parts and parts[0].isdigit() and len(parts[0]) == 4:
+        candidate = os.path.join(SINGLE_DIR, f"{parts[0]}.FCStd")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+def total_edge_length(obj):
+    """Zwraca sumę długości wszystkich krawędzi obiektu."""
+    if not hasattr(obj, "Shape"):
+        return None
+    try:
+        return sum(edge.Length for edge in obj.Shape.Edges)
+    except Exception:
+        return None
+
+def find_identical_by_edge_length(target, tol=1e-6):
+    """
+    Szuka obiektu o identycznej sumie długości krawędzi.
+    tol – tolerancja porównania (domyślnie 1e-6).
+    """
+    length_t = total_edge_length(target)
+    if length_t is None:
+        return None
+
+    for obj in doc.Objects:
+        if obj == target:
+            continue
+        length_o = total_edge_length(obj)
+        if length_o is None:
+            continue
+        if abs(length_o - length_t) <= tol:
+            return obj
+    return None
+
+def cleanup_single_dir():
+    if not os.path.isdir(SINGLE_DIR):
+        return
+    used_files = set()
+    for obj in doc.Objects:
+        sf = get_file_for_object(obj)
+        if sf:
+            used_files.add(os.path.abspath(sf))
+    for fname in os.listdir(SINGLE_DIR):
+        fpath = os.path.abspath(os.path.join(SINGLE_DIR, fname))
+        if fpath not in used_files:
+            try:
+                os.remove(fpath)
+                App.Console.PrintMessage(f"Usunięto zbędny plik: {fname}\n")
+            except Exception as e:
+                App.Console.PrintError(f"Nie udało się usunąć {fname}: {e}\n")
+
+# --- Główna logika ---
+
+for target in sel:
+    identical_obj = find_identical_by_edge_length(target)
+    if identical_obj:
+        base_label = identical_obj.Label.split("_")[0]
+        copies = [o for o in doc.Objects if o.Label.startswith(base_label)]
+
+        # wyciągamy numery sufiksów
+        used_nums = set()
+        for o in copies:
+            parts = o.Label.split("_")
+            if len(parts) > 1 and parts[1].isdigit():
+                used_nums.add(int(parts[1]))
+
+        # pierwszy wolny numer
+        new_num = 1
+        while new_num in used_nums:
+            new_num += 1
+
+        # nowa etykieta
+        new_label = f"{base_label}_{new_num:03d}"
+        target.Label = new_label
+
+        # ustaw Source File na sztywno z prefiksu
+        prefix = target.Label.split("_")[0]
+        new_sf_value = os.path.join(".\\SINGLE", f"{prefix}.FCStd")
+        if set_source_file_direct(target, new_sf_value):
+            App.Console.PrintMessage(f"{target.Label} → ustawiono Source File na {new_sf_value}\n")
+        else:
+            App.Console.PrintError(f"{target.Label} → nie znaleziono właściwości 'source File'\n")
+
+        App.Console.PrintMessage(
+            f"{target.Label} → identyczny z {identical_obj.Label} (suma długości krawędzi), ustawiono jako kopię.\n"
+        )
+    else:
+        App.Console.PrintMessage(
+            f"{target.Label} → brak identycznego elementu wg sumy długości krawędzi.\n"
+        )
+
+# Sprzątanie tylko jeśli wszystkie zaznaczone mają Source File
+if all(get_file_for_object(o) for o in sel):
+    cleanup_single_dir()
+else:
+    App.Console.PrintMessage(
+        "Pominięto czyszczenie SINGLE – nie wszystkie obiekty mają Source File.\n"
+    )
+
+doc.recompute()

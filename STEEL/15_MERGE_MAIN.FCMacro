@@ -1,0 +1,153 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os, re, datetime
+
+doc = App.ActiveDocument
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise Exception("Zaznacz co najmniej jeden element wysyłkowy do porównania.")
+
+DOC_DIR = os.path.dirname(doc.FileName)
+MAIN_DIR = os.path.join(DOC_DIR, "MAIN")
+LOG_FILE = os.path.join(MAIN_DIR, "MERGE_LOG.txt")
+
+# --- Logowanie ---
+
+def log(msg):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {msg}\n")
+    App.Console.PrintMessage(msg + "\n")
+
+# --- Funkcje pomocnicze ---
+
+def resolve_path(p):
+    """Zwraca absolutną ścieżkę do p. Obsługuje ścieżki względne względem DOC_DIR."""
+    if not p:
+        return None
+    p = os.path.normpath(p)
+    if os.path.isabs(p):
+        return p
+    return os.path.normpath(os.path.join(DOC_DIR, p))
+
+def total_edge_length(obj):
+    if not hasattr(obj, "Shape") or obj.Shape.isNull():
+        return 0.0
+    return sum(edge.Length for edge in obj.Shape.Edges)
+
+def extract_object_list(fcstd_path, ndigits=3):
+    """Zwraca listę (etykieta_bez_sufiksu, długość) dla obiektów w pliku."""
+    abs_path = resolve_path(fcstd_path)
+    if not abs_path or not os.path.isfile(abs_path):
+        log(f"<Info> Plik '{fcstd_path}' nierozpoznany lub nie istnieje (abs: {abs_path}).")
+        return []
+    try:
+        td = App.openDocument(abs_path)
+    except Exception as e:
+        log(f"<Error> Nie udało się otworzyć '{abs_path}': {e}")
+        return []
+    try:
+        objs = []
+        for o in td.Objects:
+            if hasattr(o, "Shape") and not o.Shape.isNull():
+                length = round(total_edge_length(o), ndigits)
+                base_label = o.Label.split("_")[0] if "_" in o.Label else o.Label
+                objs.append((base_label, length))
+        objs.sort()
+        return objs
+    finally:
+        App.closeDocument(td.Name)
+
+def get_source_file(obj):
+    for prop in obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            return getattr(obj, prop)
+    return None
+
+def set_source_file_direct(obj, path_rel):
+    """Ustawia SourceFile na ścieżkę względną (np. 'MAIN/100.FCStd')."""
+    path_rel = path_rel.replace("\\", "/")  # stabilny zapis
+    for prop in obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            setattr(obj, prop, path_rel)
+            return True
+    return False
+
+def cleanup_main_dir():
+    """Usuwa nieużywane pliki z MAIN (takie, które nie są wskazywane przez SourceFile żadnego obiektu)."""
+    if not os.path.isdir(MAIN_DIR):
+        return
+    used_files = set()
+    for obj in doc.Objects:
+        sf = get_source_file(obj)
+        if sf:
+            abs_sf = resolve_path(sf)
+            if abs_sf and os.path.isfile(abs_sf):
+                used_files.add(os.path.abspath(abs_sf))
+    for fname in os.listdir(MAIN_DIR):
+        fpath = os.path.abspath(os.path.join(MAIN_DIR, fname))
+        if fname.endswith(".FCStd") and fpath not in used_files:
+            try:
+                os.remove(fpath)
+                log(f"Usunięto zbędny plik: {fname}")
+            except Exception as e:
+                log(f"Nie udało się usunąć {fname}: {e}")
+
+# --- Główna logika ---
+
+for target in sel:
+    sf_target = get_source_file(target)
+    if not sf_target:
+        log(f"{target.Label} → brak SourceFile, pomijam porównanie.")
+        continue
+
+    # Lista i sygnatura dla wskazanego przez SourceFile
+    list_target = extract_object_list(sf_target)
+    sig_target = f"{len(list_target)}|" + ",".join(f"{l:.3f}" for _, l in list_target)
+
+    matched_pref = None
+    for fname in os.listdir(MAIN_DIR):
+        if not fname.endswith(".FCStd"):
+            continue
+        name_no_ext = os.path.splitext(fname)[0]
+        if not name_no_ext.isdigit():
+            continue
+        pref = int(name_no_ext)
+        fcstd_path = os.path.join(MAIN_DIR, fname)
+        objs = extract_object_list(fcstd_path)
+        if not objs:
+            continue
+        sig_file = f"{len(objs)}|" + ",".join(f"{l:.3f}" for _, l in objs)
+        if sig_file == sig_target:
+            if objs == list_target:
+                matched_pref = pref
+                break
+
+    if matched_pref is not None:
+        base_label = f"{matched_pref:03d}"
+        copies = [o for o in doc.Objects if (o.Label or "").startswith(base_label + "_")]
+        used_nums = set()
+        for o in copies:
+            parts = (o.Label or "").split("_")
+            if len(parts) > 1 and parts[1].isdigit():
+                used_nums.add(int(parts[1]))
+        new_num = 1
+        while new_num in used_nums:
+            new_num += 1
+        new_label = f"{base_label}_{new_num:03d}"
+        target.Label = new_label
+
+        # Ustaw stabilną, względną ścieżkę do MAIN
+        new_sf_value = os.path.join("MAIN", f"{base_label}.FCStd").replace("\\", "/")
+        if set_source_file_direct(target, new_sf_value):
+            log(f"{target.Label} → identyczny z istniejącym {base_label}, ustawiono jako kopię i SourceFile='{new_sf_value}'.")
+        else:
+            log(f"{target.Label} → identyczny z {base_label}, ale nie znaleziono właściwości 'SourceFile'.")
+    else:
+        log(f"{target.Label} → brak identycznego elementu, pozostaje nowy.")
+
+cleanup_main_dir()
+doc.recompute()
+log("Operacja MERGE zakończona.")

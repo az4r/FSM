@@ -1,0 +1,70 @@
+import FreeCAD as App
+from FreeCAD import Vector
+import math
+
+# --- USTAWIENIA ---
+coord_tol = 0.001   # tolerancja dla "czystych" współrzędnych (mm)
+min_length = 0.01   # minimalna długość linii, poniżej której uznajemy ją za podejrzaną (mm)
+
+doc = App.ActiveDocument
+if not doc:
+    raise RuntimeError("Brak aktywnego dokumentu.")
+
+suspects = []
+
+for obj in doc.Objects:
+    # sprawdzamy tylko obiekty z krawędziami (linie Draft/Arch)
+    if not hasattr(obj, "Shape"):
+        continue
+    if not obj.Shape.Edges:
+        continue
+    # bierzemy pierwszą krawędź (dla linii powinna być jedna)
+    edge = obj.Shape.Edges[0]
+    p0 = edge.Vertexes[0].Point
+    p1 = edge.Vertexes[1].Point
+
+    # sprawdzenie długości
+    length = edge.Length
+    bad_length = length < min_length
+
+    # sprawdzenie "czystości" współrzędnych
+    def is_suspicious_point(pt):
+        for coord in (pt.x, pt.y, pt.z):
+            if abs(coord - round(coord)) > coord_tol:
+                return True
+        return False
+
+    bad_coords = is_suspicious_point(p0) or is_suspicious_point(p1)
+
+    # sprawdzenie czy punkty są identyczne
+    same_point = (p0 - p1).Length < coord_tol
+
+    if bad_length or bad_coords or same_point:
+        suspects.append({
+            "Label": obj.Label,
+            "Length": length,
+            "P0": p0,
+            "P1": p1,
+            "BadLength": bad_length,
+            "BadCoords": bad_coords,
+            "SamePoint": same_point
+        })
+
+# --- Raport ---
+if not suspects:
+    App.Console.PrintMessage("✅ Wszystkie linie wyglądają poprawnie.\n")
+else:
+    App.Console.PrintMessage("⚠️ Wykryto podejrzane linie:\n")
+    for s in suspects:
+        reasons = []
+        if s["BadLength"]:
+            reasons.append("bardzo krótka")
+        if s["BadCoords"]:
+            reasons.append("nieczyste współrzędne")
+        if s["SamePoint"]:
+            reasons.append("identyczne punkty")
+        App.Console.PrintMessage(
+            f"- {s['Label']}: dł.={s['Length']:.6f} mm, "
+            f"P0={s['P0']}, P1={s['P1']} "
+            f"[{', '.join(reasons)}]\n"
+        )

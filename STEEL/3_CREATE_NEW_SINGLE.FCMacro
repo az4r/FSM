@@ -1,0 +1,147 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+from FreeCAD import Vector
+import os, re, shutil
+
+# --- Funkcja wypalania Placementu linii ---
+def wypal_placement_linii(obj):
+    """
+    Wypala Placement dla obiektu typu linia:
+    - przenosi na najwyższy poziom (usuwa z grupy, jeśli jest)
+    - ustawia oś Z wzdłuż linii
+    - zachowuje globalne punkty (początek jako Base)
+    Zwraca nowy Placement.
+    """
+    if not hasattr(obj, "Shape") or len(obj.Shape.Vertexes) < 2:
+        raise ValueError(f"{obj.Label}: obiekt nie ma geometrii linii (wymagane co najmniej 2 wierzchołki).")
+
+    # usunięcie z kontenera (obiekt pozostaje w dokumencie)
+    if hasattr(obj, "getParentGroup"):
+        parent = obj.getParentGroup()
+        if parent:
+            parent.removeObject(obj)
+
+    # globalne punkty
+    p1_global = obj.Shape.Vertexes[0].Point
+    p2_global = obj.Shape.Vertexes[1].Point
+
+    # „wypalenie” – ustawienie bezpośrednich punktów i reset Placementu
+    obj.Points = [p1_global, p2_global]
+    obj.Placement = App.Placement()
+
+    # oś Z wzdłuż linii, X/Y prostopadłe
+    axis_z = (p2_global - p1_global).normalize()
+    helper = App.Vector(1,0,0) if abs(axis_z.dot(App.Vector(0,0,1))) > 0.99 else App.Vector(0,0,1)
+    axis_x = helper.cross(axis_z).normalize()
+    axis_y = axis_z.cross(axis_x).normalize()
+
+    rot_new = App.Rotation(axis_x, axis_y, axis_z)
+    base_new = p1_global
+
+    pl_new = App.Placement(base_new, rot_new)
+
+    # przeliczenie punktów do lokalnego układu, aby geometria pozostała w miejscu
+    ipl_new = pl_new.inverse()
+    p1_local_new = ipl_new.multVec(p1_global)
+    p2_local_new = ipl_new.multVec(p2_global)
+
+    obj.Points = [p1_local_new, p2_local_new]
+    obj.Placement = pl_new
+
+    return pl_new
+
+# --- Oryginalna logika makra ---
+doc = App.ActiveDocument
+if not doc:
+    raise RuntimeError("Brak aktywnego dokumentu.")
+
+if not doc.FileName:
+    raise RuntimeError("Zapisz dokument, aby znać katalog roboczy.")
+
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise RuntimeError("Zaznacz co najmniej jeden obiekt A2plus w modelu.")
+
+# --- Wyszukiwanie użytych prefiksów czterocyfrowych ---
+pat = re.compile(r"^(\d{4})")
+used_prefixes = set()
+for o in doc.Objects:
+    m = pat.match(o.Label)
+    if m:
+        used_prefixes.add(int(m.group(1)))
+
+doc_dir = os.path.dirname(doc.FileName)
+
+for src_obj in sel:
+    # --- Szukanie właściwości SourceFile ---
+    source_file = None
+    for prop in src_obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            source_file = src_obj.getPropertyByName(prop)
+            break
+
+    if not source_file:
+        App.Console.PrintError(f"Obiekt {src_obj.Label} nie ma właściwości 'SourceFile'.\n")
+        continue
+
+    # --- Obsługa ścieżki względnej/absolutnej ---
+    is_relative = not os.path.isabs(source_file)
+    if is_relative:
+        abs_source_file = os.path.normpath(os.path.join(doc_dir, source_file))
+    else:
+        abs_source_file = source_file
+
+    if not os.path.isfile(abs_source_file):
+        App.Console.PrintError(f"Nie znaleziono pliku źródłowego: {abs_source_file}\n")
+        continue
+
+    # --- Znalezienie pierwszego wolnego prefiksu ---
+    prefix_num = 1000
+    while prefix_num in used_prefixes:
+        prefix_num += 1
+        if prefix_num > 9999:
+            raise RuntimeError("Brak wolnych prefiksów.")
+    used_prefixes.add(prefix_num)
+    prefix_str = f"{prefix_num:04d}"
+
+    # --- Utworzenie nowej nazwy pliku ---
+    new_name = f"{prefix_str}.FCStd"
+
+    if is_relative:
+        rel_dir = os.path.dirname(source_file)
+        new_path_abs = os.path.normpath(os.path.join(doc_dir, rel_dir, new_name))
+        os.makedirs(os.path.dirname(new_path_abs), exist_ok=True)
+        shutil.copy2(abs_source_file, new_path_abs)
+        new_source_value = os.path.join(rel_dir, new_name)
+    else:
+        base_dir = os.path.dirname(abs_source_file)
+        new_path_abs = os.path.normpath(os.path.join(base_dir, new_name))
+        shutil.copy2(abs_source_file, new_path_abs)
+        new_source_value = new_path_abs
+
+    App.Console.PrintMessage(f"Utworzono kopię pliku: {new_path_abs}\n")
+
+    # --- Utworzenie nowego obiektu ---
+    new_obj = doc.copyObject(src_obj, False)
+    new_obj.Label = f"{prefix_str}_001"
+
+    # --- Podmiana ścieżki ---
+    for prop in new_obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            setattr(new_obj, prop, new_source_value)
+            break
+
+    # --- Wypalenie Placementu dla nowego obiektu (jeśli jest linią) ---
+    try:
+        wypal_placement_linii(new_obj)
+        App.Console.PrintMessage(f"Wypalono Placement dla {new_obj.Label}\n")
+    except Exception as e:
+        App.Console.PrintMessage(f"{new_obj.Label}: pomijam wypalanie (powód: {e})\n")
+
+    # --- Usunięcie starego obiektu ---
+    doc.removeObject(src_obj.Name)
+
+doc.recompute()
+App.Console.PrintMessage("Przetwarzanie zaznaczonych obiektów zakończone.\n")

@@ -1,0 +1,223 @@
+import FreeCAD
+import FreeCADGui
+import os
+from PySide import QtGui, QtCore
+
+# --- Ścieżka do pliku tymczasowego ---
+def get_temp_file_path():
+    doc = FreeCAD.ActiveDocument
+    if not doc or not doc.FileName:
+        # Jeśli dokument nie jest zapisany, użyj katalogu domowego
+        return os.path.join(os.path.expanduser("~"), "freecad_move_copy_temp.txt")
+    folder = os.path.dirname(doc.FileName)
+    return os.path.join(folder, "move_copy_temp.txt")
+
+# --- Zapisywanie / wczytywanie / czyszczenie ---
+def save_temp_data(sel_names, action, vec):
+    path = get_temp_file_path()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(action + "\n")
+        f.write(f"{vec.x},{vec.y},{vec.z}\n")
+        for name in sel_names:
+            f.write(name + "\n")
+
+def load_temp_data():
+    path = get_temp_file_path()
+    if not os.path.exists(path):
+        return None, None, None
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+    if len(lines) < 2:
+        return None, None, None
+    action = lines[0]
+    vec_parts = lines[1].split(",")
+    try:
+        vec = FreeCAD.Vector(float(vec_parts[0]), float(vec_parts[1]), float(vec_parts[2]))
+    except:
+        vec = None
+    sel_names = lines[2:] if len(lines) > 2 else []
+    return action, vec, sel_names
+
+def clear_temp_data():
+    path = get_temp_file_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+def capture_current_selection_names():
+    sel = FreeCADGui.Selection.getSelection()
+    return [o.Name for o in sel] if sel else []
+
+def resolve_objects_by_names(names):
+    doc = FreeCAD.ActiveDocument
+    if not doc:
+        return []
+    objs = []
+    for n in names or []:
+        obj = doc.getObject(n)
+        if obj is not None:
+            objs.append(obj)
+    return objs
+
+class MoveCopyDialog(QtGui.QDialog):
+    def __init__(self, action=None, vec=None, sel_names=None):
+        super(MoveCopyDialog, self).__init__()
+        self.setWindowTitle("Move / Copy Objects")
+        self._p1 = None
+        self.sel_names = sel_names
+
+        # --- Radio buttons ---
+        self.move_radio = QtGui.QRadioButton("Move")
+        self.copy_radio = QtGui.QRadioButton("Copy")
+        if action == "copy":
+            self.copy_radio.setChecked(True)
+        else:
+            self.move_radio.setChecked(True)
+
+        radio_layout = QtGui.QHBoxLayout()
+        radio_layout.addWidget(self.move_radio)
+        radio_layout.addWidget(self.copy_radio)
+
+        # --- Pola X, Y, Z ---
+        self.x_input = QtGui.QDoubleSpinBox()
+        self.x_input.setRange(-1e9, 1e9)
+        self.x_input.setDecimals(6)
+
+        self.y_input = QtGui.QDoubleSpinBox()
+        self.y_input.setRange(-1e9, 1e9)
+        self.y_input.setDecimals(6)
+
+        self.z_input = QtGui.QDoubleSpinBox()
+        self.z_input.setRange(-1e9, 1e9)
+        self.z_input.setDecimals(6)
+
+        if vec:
+            self.x_input.setValue(vec.x)
+            self.y_input.setValue(vec.y)
+            self.z_input.setValue(vec.z)
+        else:
+            self.x_input.setValue(0.0)
+            self.y_input.setValue(0.0)
+            self.z_input.setValue(0.0)
+
+        form_layout = QtGui.QFormLayout()
+        form_layout.addRow("X:", self.x_input)
+        form_layout.addRow("Y:", self.y_input)
+        form_layout.addRow("Z:", self.z_input)
+
+        # --- Info o zaznaczeniu ---
+        sel_info = QtGui.QLabel(f"Zapisane obiekty: {len(sel_names) if sel_names else 0}")
+        sel_info.setStyleSheet("color: gray;")
+        self.sel_info = sel_info
+
+        # --- Przyciski ---
+        self.ok_button = QtGui.QPushButton("OK")
+        self.cancel_button = QtGui.QPushButton("Cancel")
+        self.to_point_button = QtGui.QPushButton("To point")
+
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        self.to_point_button.clicked.connect(self.pick_points)
+
+        # Układ przycisków OK/Cancel - wyśrodkowany
+        ok_cancel_layout = QtGui.QHBoxLayout()
+        ok_cancel_layout.addStretch()
+        ok_cancel_layout.addWidget(self.ok_button)
+        ok_cancel_layout.addWidget(self.cancel_button)
+        ok_cancel_layout.addStretch()
+
+
+        # --- Główny układ ---
+        main_layout = QtGui.QVBoxLayout()
+        main_layout.addLayout(radio_layout)
+        main_layout.addWidget(sel_info)
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.to_point_button)
+        main_layout.addLayout(ok_cancel_layout)
+
+        self.setLayout(main_layout)
+
+    def pick_points(self):
+        """Zapamiętuje zaznaczenie i tryb, zamyka okno i uruchamia wybór 2 punktów."""
+        sel_names = self.sel_names or capture_current_selection_names()
+        if not sel_names:
+            QtGui.QMessageBox.warning(self, "Brak zaznaczenia",
+                                      "Najpierw zaznacz co najmniej jeden obiekt.")
+            return
+        action = "copy" if self.copy_radio.isChecked() else "move"
+        save_temp_data(sel_names, action, FreeCAD.Vector(0, 0, 0))
+        self.close()
+        FreeCAD.Console.PrintMessage("Wskaż pierwszy punkt...\n")
+        FreeCADGui.Snapper.getPoint(callback=lambda p, o=None: self._first_point_selected(p, sel_names, action))
+
+    def _first_point_selected(self, point, sel_names, action):
+        self._p1 = point
+        FreeCAD.Console.PrintMessage(f"Pierwszy punkt: {point}\nWskaż drugi punkt...\n")
+        FreeCADGui.Snapper.getPoint(callback=lambda p, o=None: self._second_point_selected(p, sel_names, action))
+
+    def _second_point_selected(self, point, sel_names, action):
+        if self._p1 is None:
+            FreeCAD.Console.PrintError("Błąd: pierwszy punkt nie został zapisany.\n")
+            return
+        vec = point.sub(self._p1)
+        save_temp_data(sel_names, action, vec)
+        FreeCAD.Console.PrintMessage(f"Zapisano wektor: {vec}\n")
+        run_macro()
+
+def apply_transform(vec, is_copy, sel_names):
+    objs = resolve_objects_by_names(sel_names)
+    if not objs:
+        QtGui.QMessageBox.warning(None, "Brak obiektów",
+                                  "Zapisane obiekty nie są dostępne w dokumencie.")
+        return (0, 0)
+    moved_count = 0
+    copied_count = 0
+    for obj in objs:
+        if is_copy:
+            new_obj = FreeCAD.ActiveDocument.copyObject(obj)
+            new_obj.Placement.Base = obj.Placement.Base.add(vec)
+            copied_count += 1
+        else:
+            obj.Placement.Base = obj.Placement.Base.add(vec)
+            moved_count += 1
+    FreeCAD.ActiveDocument.recompute()
+    return (moved_count, copied_count)
+
+def run_macro():
+    action, vec, sel_names = load_temp_data()
+
+    if not sel_names:
+        sel_names = capture_current_selection_names()
+        if not sel_names:
+            QtGui.QMessageBox.warning(None, "Błąd",
+                                      "Najpierw zaznacz jeden lub więcej obiektów w modelu.")
+            return
+
+    dialog = MoveCopyDialog(action, vec, sel_names)
+    result = dialog.exec_()
+    if result == QtGui.QDialog.Accepted:
+        dx = dialog.x_input.value()
+        dy = dialog.y_input.value()
+        dz = dialog.z_input.value()
+
+        if action in ("move", "copy"):
+            is_copy = (action == "copy")
+        else:
+            is_copy = dialog.copy_radio.isChecked()
+            action = "copy" if is_copy else "move"
+
+        moved_count, copied_count = apply_transform(FreeCAD.Vector(dx, dy, dz), is_copy, sel_names)
+
+        if is_copy:
+            FreeCAD.Console.PrintMessage(
+                f"Skopiowano {copied_count} obiekt(ów) o wektor: ({dx}, {dy}, {dz})\n"
+            )
+        else:
+            FreeCAD.Console.PrintMessage(
+                f"Przesunięto {moved_count} obiekt(ów) o wektor: ({dx}, {dy}, {dz})\n"
+            )
+
+    # Po zamknięciu okna (OK lub Cancel) czyścimy plik z pamięcią
+    clear_temp_data()
+
+# Start
+run_macro()

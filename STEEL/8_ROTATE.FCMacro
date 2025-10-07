@@ -1,0 +1,80 @@
+import FreeCAD
+import FreeCADGui
+from PySide import QtGui
+
+def rotate_around_longest_edge_with_center_comp_multi():
+    doc = FreeCAD.ActiveDocument
+    selection = FreeCADGui.Selection.getSelection()
+    if not selection:
+        QtGui.QMessageBox.information(None, "Brak zaznaczenia", "Zaznacz co najmniej jeden element.")
+        return
+
+    angle, ok = QtGui.QInputDialog.getDouble(None, "Obrót wokół najdłuższej krawędzi",
+                                             "Podaj kąt obrotu w stopniach:",
+                                             0.0, -360.0, 360.0, 2)
+    if not ok:
+        return
+
+    doc.openTransaction("Rotate around longest edge + center compensation")
+
+    skipped = []
+    for obj in selection:
+        try:
+            if not hasattr(obj, "Shape") or obj.Shape.isNull():
+                skipped.append(obj.Label if hasattr(obj, "Label") else str(obj))
+                continue
+
+            # 1) Środek geometryczny PRZED (na podstawie BoundBox – stabilny i szybki)
+            pre_center = obj.Shape.BoundBox.Center
+
+            # 2) Najdłuższa zewnętrzna krawędź
+            edges = obj.Shape.Edges
+            if not edges:
+                skipped.append(obj.Label if hasattr(obj, "Label") else str(obj))
+                continue
+            longest = max(edges, key=lambda e: e.Length)
+
+            # 3) Punkty końcowe osi i jej kierunek
+            try:
+                pnts = longest.discretize(2)
+                p1, p2 = pnts[0], pnts[-1]
+            except Exception:
+                verts = longest.Vertexes
+                p1, p2 = verts[0].Point, verts[-1].Point
+
+            axis_vec = p2.sub(p1)
+            if axis_vec.Length == 0:
+                skipped.append(obj.Label if hasattr(obj, "Label") else str(obj))
+                continue
+
+            axis_dir = axis_vec.normalize()
+            axis_center = (p1.add(p2)).multiply(0.5)  # środek najdłuższej krawędzi
+
+            # 4) Sama rotacja wokół osi (Placement z punktem obrotu)
+            rot = FreeCAD.Rotation(axis_dir, angle)
+            delta_rot = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rot, axis_center)
+
+            # 5) Wyznacz nowy środek po ROTACJI (na kopii kształtu)
+            tmp_shape = obj.Shape.copy()
+            tmp_shape.Placement = delta_rot.multiply(obj.Placement)
+            post_center = tmp_shape.BoundBox.Center
+
+            # 6) Translacja kompensująca, by przywrócić pierwotny środek
+            trans_vec = pre_center.sub(post_center)
+            delta_trans = FreeCAD.Placement(trans_vec, FreeCAD.Rotation())
+
+            # 7) Finalny Placement = translacja kompensująca ∘ rotacja ∘ stary placement
+            obj.Placement = delta_trans.multiply(delta_rot).multiply(obj.Placement)
+
+        except Exception:
+            skipped.append(obj.Label if hasattr(obj, "Label") else str(obj))
+
+    doc.recompute()
+    doc.commitTransaction()
+
+    if skipped:
+        QtGui.QMessageBox.warning(None, "Uwaga",
+                                  "Pominięto obiekty bez kształtu lub z błędem:\n- " +
+                                  "\n- ".join(skipped))
+
+rotate_around_longest_edge_with_center_comp_multi()

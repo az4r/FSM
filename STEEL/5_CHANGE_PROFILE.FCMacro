@@ -1,0 +1,187 @@
+# -*- coding: utf-8 -*-
+import FreeCAD, FreeCADGui as Gui
+import Arch, ArchProfile, Draft
+from PySide import QtGui
+import os
+
+def message(title, text):
+    QtGui.QMessageBox.information(None, title, text)
+
+def warning(title, text):
+    QtGui.QMessageBox.warning(None, title, text)
+
+def get_selected_objects():
+    sel = Gui.Selection.getSelection()
+    if not sel:
+        warning("Błąd", "Nie zaznaczono żadnego obiektu w głównym modelu.")
+        return []
+    return sel
+
+def get_source_file_from_object(obj):
+    try:
+        val = obj.getPropertyByName("source File")
+        if val:
+            return val
+    except Exception:
+        pass
+    for prop in ("SourceFile", "sourceFile", "source file", "File"):
+        try:
+            v = getattr(obj, prop, None)
+            if v:
+                return v
+        except Exception:
+            continue
+    return None
+
+def choose_profile():
+    presets = ArchProfile.readPresets()
+    if not presets:
+        warning("Błąd", "Brak dostępnych profili.")
+        return None
+
+    categories = sorted(set([pre[1] for pre in presets]))
+    cat, ok = QtGui.QInputDialog.getItem(None, "Wybór kategorii", "Kategoria profilu:", categories, 0, False)
+    if not ok:
+        return None
+
+    profiles_in_cat = [pre for pre in presets if pre[1] == cat]
+    names = sorted([pre[2] for pre in profiles_in_cat])
+    prof_name, ok = QtGui.QInputDialog.getItem(None, "Wybór profilu", "Typ profilu:", names, 0, False)
+    if not ok:
+        return None
+
+    return next((pre for pre in profiles_in_cat if pre[2] == prof_name), None)
+
+def open_external_document(filepath):
+    if not os.path.isabs(filepath):
+        main_doc_path = FreeCAD.ActiveDocument.FileName
+        if main_doc_path:
+            base_dir = os.path.dirname(main_doc_path)
+            filepath = os.path.normpath(os.path.join(base_dir, filepath))
+    try:
+        doc = FreeCAD.openDocument(filepath)
+        return doc
+    except Exception as e:
+        warning("Błąd", f"Nie udało się otworzyć pliku źródłowego:\n{filepath}\n{e}")
+        return None
+
+def find_frame_object_in_doc(doc):
+    obj = doc.getObject("Frame")
+    if obj:
+        return obj
+    for o in doc.Objects:
+        if hasattr(o, "Profile"):
+            return o
+    for o in doc.Objects:
+        if "frame" in o.Name.lower() or "frame" in o.Label.lower():
+            return o
+    return None
+
+def remove_old_profile(doc, frame_obj):
+    try:
+        if hasattr(frame_obj, "Profile") and frame_obj.Profile:
+            old_prof = frame_obj.Profile
+            frame_obj.Profile = None
+            doc.recompute()
+            if old_prof and doc.getObject(old_prof.Name):
+                try:
+                    doc.removeObject(old_prof.Name)
+                    doc.recompute()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def create_new_profile(prof_data):
+    try:
+        new_prof = Arch.makeProfile(prof_data)
+        Draft.autogroup(new_prof)
+        return new_prof
+    except Exception as e:
+        warning("Błąd", f"Nie udało się utworzyć profilu:\n{e}")
+        return None
+
+def place_profile_at_base_midpoint(frame_obj, profile_obj):
+    try:
+        base = getattr(frame_obj, "Base", None)
+        if not base or not hasattr(base, "Shape"):
+            return
+        edges = base.Shape.Edges
+        if not edges:
+            return
+        e = edges[0]
+        v0 = e.Vertexes[0].Point
+        v1 = e.Vertexes[-1].Point
+        mid = (v0.add(v1)).multiply(0.5)
+        profile_obj.Placement.Base = mid
+    except Exception:
+        pass
+
+def save_and_close(doc):
+    try:
+        doc.recompute()
+        doc.save()
+        FreeCAD.closeDocument(doc.Name)
+    except Exception as e:
+        warning("Błąd", f"Nie udało się zapisać/zamknąć dokumentu źródłowego:\n{e}")
+
+def main():
+    selected_objects = get_selected_objects()
+    if not selected_objects:
+        return
+
+    prof_data = choose_profile()
+    if not prof_data:
+        return
+
+    for sel_obj in selected_objects:
+        filepath = get_source_file_from_object(sel_obj)
+        if not filepath:
+            warning("Błąd", f"Nie udało się odczytać właściwości 'source File' z obiektu: {sel_obj.Label}")
+            continue
+
+        doc_ext = open_external_document(filepath)
+        if not doc_ext:
+            continue
+
+        frame_ext = find_frame_object_in_doc(doc_ext)
+        if not frame_ext:
+            warning("Błąd", f"Nie znaleziono obiektu typu Frame w pliku źródłowym: {filepath}")
+            try:
+                FreeCAD.closeDocument(doc_ext.Name)
+            except Exception:
+                pass
+            continue
+
+        remove_old_profile(doc_ext, frame_ext)
+        new_prof = create_new_profile(prof_data)
+        if not new_prof:
+            try:
+                FreeCAD.closeDocument(doc_ext.Name)
+            except Exception:
+                pass
+            continue
+
+        place_profile_at_base_midpoint(frame_ext, new_prof)
+        try:
+            frame_ext.Profile = new_prof
+        except Exception as e:
+            warning("Błąd", f"Nie udało się podpiąć profilu do obiektu Frame:\n{e}")
+            try:
+                FreeCAD.closeDocument(doc_ext.Name)
+            except Exception:
+                pass
+            continue
+
+        save_and_close(doc_ext)
+
+    try:
+        FreeCAD.ActiveDocument.recompute()
+        Gui.runCommand('a2p_updateImportedParts', 0)
+    except Exception:
+        pass
+
+    message("Gotowe", "Profil został zmieniony dla wszystkich zaznaczonych elementów i model odświeżony.")
+
+if __name__ == "__main__":
+    main()

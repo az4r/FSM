@@ -1,0 +1,222 @@
+import FreeCAD as App
+import os, re
+from PySide import QtGui
+
+doc = App.ActiveDocument
+if not doc or not doc.FileName:
+    raise RuntimeError("Zapisz dokument przed uruchomieniem makra.")
+
+DOC_DIR    = os.path.dirname(doc.FileName)
+MAIN_DIR   = os.path.join(DOC_DIR, "MAIN")
+SINGLE_DIR = os.path.join(DOC_DIR, "SINGLE")
+
+re_ew     = re.compile(r"^(\d{3})_")
+re_single = re.compile(r"^(\d{4})_")
+
+# --- Funkcje pomocnicze ---
+
+def get_prefix(label):
+    m = re_ew.match(label or "")
+    return m.group(1) if m else None
+
+def get_single_file_from_label(label):
+    m = re_single.match(label or "")
+    if not m:
+        return None
+    pref4 = m.group(1)
+    return os.path.join(SINGLE_DIR, f"{pref4}.FCStd")
+
+def get_profile_name(single_fcstd):
+    if not single_fcstd or not os.path.isfile(single_fcstd):
+        return "?"
+    try:
+        td = App.openDocument(single_fcstd)
+    except Exception:
+        return "?"
+    try:
+        for o in td.Objects:
+            lbl = o.Label or ""
+            if "frame" in lbl.lower() or o.Name.lower().startswith("frame"):
+                if hasattr(o, "Profile") and o.Profile:
+                    prof_obj = o.Profile
+                    if hasattr(prof_obj, "Label") and prof_obj.Label:
+                        return prof_obj.Label
+                for c in getattr(o, "OutList", []):
+                    if hasattr(c, "Label") and c.Label:
+                        return c.Label
+                return o.Label or "?"
+        for o in td.Objects:
+            if hasattr(o, "Shape") and o.Shape and not o.Shape.isNull():
+                return o.Label or "?"
+        return "?"
+    finally:
+        App.closeDocument(td.Name)
+
+def get_dims_from_bbox(obj):
+    if not hasattr(obj,"Shape") or not obj.Shape or obj.Shape.isNull():
+        return (0.0,0.0,0.0)
+    bb = obj.Shape.BoundBox
+    dims = [bb.XLength, bb.YLength, bb.ZLength]
+    dims.sort(reverse=True)
+    return dims[0], dims[1], dims[2]
+
+# --- Okienka ---
+
+apply_to_all_mat = False
+global_material = "S355J2"
+
+apply_to_all_dens = False
+global_density = 7850.0  # kg/m³
+
+def ask_material(default="S355J2"):
+    global apply_to_all_mat, global_material
+    if apply_to_all_mat:
+        return global_material
+    dialog = QtGui.QDialog()
+    dialog.setWindowTitle("Gatunek stali")
+    layout = QtGui.QVBoxLayout(dialog)
+    form_layout = QtGui.QHBoxLayout()
+    label = QtGui.QLabel("Gatunek stali:")
+    textbox = QtGui.QLineEdit()
+    textbox.setText(default)
+    form_layout.addWidget(label)
+    form_layout.addWidget(textbox)
+    layout.addLayout(form_layout)
+    checkbox = QtGui.QCheckBox("Zastosuj do wszystkich pozycji")
+    layout.addWidget(checkbox)
+    button_box = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok)
+    layout.addWidget(button_box)
+    button_box.accepted.connect(dialog.accept)
+    if dialog.exec_() == QtGui.QDialog.Accepted:
+        mat = textbox.text().strip() or default
+        if checkbox.isChecked():
+            apply_to_all_mat = True
+            global_material = mat
+        return mat
+    return default
+
+def ask_density(default=7850.0):
+    global apply_to_all_dens, global_density
+    if apply_to_all_dens:
+        return global_density
+    dialog = QtGui.QDialog()
+    dialog.setWindowTitle("Gęstość stali")
+    layout = QtGui.QVBoxLayout(dialog)
+    form_layout = QtGui.QHBoxLayout()
+    label = QtGui.QLabel("Gęstość stali:")
+    textbox = QtGui.QLineEdit()
+    textbox.setText(str(default))
+    unit = QtGui.QLabel("kg/m³")
+    form_layout.addWidget(label)
+    form_layout.addWidget(textbox)
+    form_layout.addWidget(unit)
+    layout.addLayout(form_layout)
+    checkbox = QtGui.QCheckBox("Zastosuj do wszystkich pozycji")
+    layout.addWidget(checkbox)
+    button_box = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok)
+    layout.addWidget(button_box)
+    button_box.accepted.connect(dialog.accept)
+    if dialog.exec_() == QtGui.QDialog.Accepted:
+        try:
+            dens = float(textbox.text().strip())
+        except:
+            dens = default
+        if checkbox.isChecked():
+            apply_to_all_dens = True
+            global_density = dens
+        return dens
+    return default
+
+# --- Zbieranie danych ---
+
+ew_data = {}
+for o in doc.Objects:
+    pref = get_prefix(o.Label or "")
+    if not pref:
+        continue
+    ew = ew_data.setdefault(pref, {"ilosc":0, "dlugosc":0.0, "nazwa":"?", "szer":0.0, "wys":0.0})
+    ew["ilosc"] += 1
+
+for pref, data in ew_data.items():
+    fcstd_path = os.path.join(MAIN_DIR, f"{pref}.FCStd")
+    if not os.path.isfile(fcstd_path):
+        continue
+    try:
+        td = App.openDocument(fcstd_path)
+    except Exception:
+        continue
+    try:
+        parts = [o for o in td.Objects if re_single.match(o.Label or "")]
+        total_len = 0.0
+        szer = 0.0
+        wys = 0.0
+        profile_name = data["nazwa"]
+        for p in parts:
+            L, W, H = get_dims_from_bbox(p)
+            total_len += L
+            szer = max(szer, W)
+            wys = max(wys, H)
+            sf = get_single_file_from_label(p.Label)
+            if (profile_name == "?" or not profile_name) and sf:
+                profile_name = get_profile_name(sf)
+        data["dlugosc"] = total_len
+        data["szer"] = szer
+        data["wys"] = wys
+        data["nazwa"] = profile_name or "?"
+    finally:
+        App.closeDocument(td.Name)
+
+# --- Arkusz ---
+if "BOM_EW" in doc.Objects:
+    sheet = doc.getObject("BOM_EW")
+    sheet.clearAll()
+else:
+    sheet = doc.addObject("Spreadsheet::Sheet","BOM_EW")
+
+# Nagłówek główny
+sheet.set("A1","LISTA ELEMENTÓW WYSYŁKOWYCH")
+
+# Nagłówki kolumn (od wiersza 2)
+sheet.set("A2","Nr EW")
+sheet.set("B2","Nazwa")
+sheet.set("C2","Ilość")
+sheet.set("D2","Długość [mm]")
+sheet.set("E2","Szerokość [mm]")
+sheet.set("F2","Wysokość [mm]")
+sheet.set("G2","Gatunek stali")
+sheet.set("H2","Waga elementu [kg]")
+sheet.set("I2","Waga łącznie [kg]")
+
+row = 3
+total_weight = 0.0
+
+for pref, data in sorted(ew_data.items()):
+    # najpierw pytamy o gatunek
+    material = ask_material("S355J2")
+    # potem pytamy o gęstość (tylko do obliczeń, nie pokazujemy w arkuszu)
+    density = ask_density(7850.0)
+
+    # objętość w m³
+    vol_m3 = (data["dlugosc"] * data["szer"] * data["wys"]) / 1e9
+    waga_elem = vol_m3 * density
+    waga_total = waga_elem * data["ilosc"]
+
+    sheet.set(f"A{row}", pref)
+    sheet.set(f"B{row}", data["nazwa"])
+    sheet.set(f"C{row}", str(data["ilosc"]))
+    sheet.set(f"D{row}", f"{data['dlugosc']:.2f}")
+    sheet.set(f"E{row}", f"{data['szer']:.2f}")
+    sheet.set(f"F{row}", f"{data['wys']:.2f}")
+    sheet.set(f"G{row}", material)
+    sheet.set(f"H{row}", f"{waga_elem:.3f}")
+    sheet.set(f"I{row}", f"{waga_total:.3f}")
+
+    total_weight += waga_total
+    row += 1
+
+# Podsumowanie pod tabelą (bez pustego wiersza)
+sheet.set(f"H{row}", "Całkowita waga konstrukcji")
+sheet.set(f"I{row}", f"{total_weight:.3f}")
+
+doc.recompute()
+App.Console.PrintMessage("Arkusz BOM_EW utworzony z nagłówkiem i podsumowaniem.\n")

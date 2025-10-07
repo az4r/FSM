@@ -1,0 +1,109 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os
+import a2p_importpart
+import re
+
+doc = App.ActiveDocument
+if not doc or not doc.FileName:
+    raise RuntimeError("Zapisz dokument główny przed uruchomieniem makra.")
+
+base_dir   = os.path.dirname(doc.FileName)
+single_dir = os.path.join(base_dir, "SINGLE")
+main_dir   = os.path.join(base_dir, "MAIN")
+
+sel = Gui.Selection.getSelection()
+if not sel or len(sel) != 1:
+    raise RuntimeError("Zaznacz dokładnie jeden element wysyłkowy.")
+
+shipment_obj   = sel[0]
+shipment_label = shipment_obj.Label
+shipment_placement = shipment_obj.Placement
+
+# sprawdź, z którego pliku pochodzi
+shipment_file = getattr(shipment_obj, "sourceFile", None) or getattr(shipment_obj, "SourceFile", None)
+if not shipment_file:
+    raise RuntimeError(f"{shipment_label}: brak informacji o pliku źródłowym (to nie jest element wysyłkowy).")
+
+abs_path = os.path.normpath(os.path.join(base_dir, shipment_file))
+if not os.path.isfile(abs_path):
+    raise RuntimeError(f"Nie znaleziono pliku wysyłkowego: {abs_path}")
+
+# --- Funkcja do znajdowania najniższego wolnego sufiksu ---
+def next_free_suffix(prefix):
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)$")
+    used = set()
+    for o in doc.Objects:
+        m = pattern.match(o.Label)
+        if m:
+            used.add(int(m.group(1)))
+    # szukamy najniższego brakującego numeru od 1
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
+# --- USUNIĘCIE KONTENERA PRZED IMPORTEM ---
+doc.removeObject(shipment_obj.Name)
+doc.recompute()
+
+# otwórz plik wysyłkowy
+ship_doc = App.openDocument(abs_path)
+
+# dla każdego obiektu w pliku wysyłkowym spróbuj odtworzyć import z katalogu SINGLE
+for obj in ship_doc.Objects:
+    if not hasattr(obj, "Label"):
+        continue
+    lbl = obj.Label
+    if "_" not in lbl:
+        continue
+
+    prefix = lbl.split("_")[0]  # np. "1000" z "1000_001"
+    part_path = os.path.join(single_dir, f"{prefix}.FCStd")
+    if not os.path.isfile(part_path):
+        App.Console.PrintError(f"{lbl}: brak pliku {part_path}\n")
+        continue
+
+    root = a2p_importpart.importPartFromFile(doc, part_path)
+    if root is None:
+        App.Console.PrintError(f"Nie udało się zaimportować {part_path}\n")
+        continue
+
+    # --- KLUCZOWA ZMIANA ---
+    # nadaj tymczasową etykietę, żeby nie blokował sufiksów
+    root.Label = "TMP"
+
+    # teraz znajdź najniższy wolny sufiks
+    new_suffix = next_free_suffix(prefix)
+    new_label = f"{prefix}_{new_suffix:03d}"
+    root.Label = new_label
+
+    # ustaw Placement
+    root.Placement = shipment_placement.multiply(obj.Placement)
+
+    # logowanie mapowania
+    App.Console.PrintMessage(f"{lbl} → {new_label}\n")
+
+# zamknij dokument wysyłkowy
+App.closeDocument(ship_doc.Name)
+
+doc.recompute()
+App.Console.PrintMessage(f"Rozpakowano element wysyłkowy {shipment_label} do elementów pojedynczych.\n")
+
+# --- SPRZĄTANIE KATALOGU MAIN ---
+pref = shipment_label.split("_")[0]
+file_fcstd = os.path.join(main_dir, f"{pref}.FCStd")
+
+still_used = False
+for o in doc.Objects:
+    sf = getattr(o, "sourceFile", None) or getattr(o, "SourceFile", None)
+    if sf and os.path.normpath(os.path.join(base_dir, sf)) == os.path.normpath(file_fcstd):
+        still_used = True
+        break
+
+if not still_used and os.path.isfile(file_fcstd):
+    try:
+        os.remove(file_fcstd)
+        App.Console.PrintMessage(f"Usunięto plik MAIN: {file_fcstd}\n")
+    except Exception as e:
+        App.Console.PrintError(f"Nie udało się usunąć {file_fcstd}: {e}\n")

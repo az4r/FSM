@@ -1,0 +1,58 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+
+doc = App.ActiveDocument
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise Exception("Zaznacz jedną lub więcej linii Draft w widoku 3D.")
+
+for obj in sel:
+    # --- Sprawdzenie, czy obiekt ma geometrię i dwa wierzchołki ---
+    if not hasattr(obj, "Shape") or len(obj.Shape.Vertexes) < 2:
+        print(f"Pomijam {obj.Label} – brak geometrii lub to nie jest linia.")
+        continue
+
+    # --- Jeśli obiekt jest w kontenerze, przenieś go na najwyższy poziom ---
+    if hasattr(obj, "getParentGroup"):
+        parent = obj.getParentGroup()
+        if parent:
+            parent.removeObject(obj)
+            doc.addObject(obj)  # dodaj na najwyższy poziom
+
+    # --- Globalne punkty z Shape ---
+    p1_global = obj.Shape.Vertexes[0].Point
+    p2_global = obj.Shape.Vertexes[1].Point
+
+    # --- Wypalenie Placementu w geometrii (tymczasowo reset) ---
+    obj.Placement = App.Placement()
+
+    # --- Ustawienie osi Z wzdłuż linii ---
+    axis_z = (p2_global - p1_global).normalize()
+    # wybór pomocniczego wektora, aby zbudować ortonormalną bazę
+    helper = App.Vector(1,0,0) if abs(axis_z.dot(App.Vector(0,0,1))) > 0.99 else App.Vector(0,0,1)
+    axis_x = helper.cross(axis_z).normalize()
+    axis_y = axis_z.cross(axis_x).normalize()
+
+    rot_new = App.Rotation(axis_x, axis_y, axis_z)
+    base_new = p1_global
+
+    # --- Przeliczenie punktów względem nowego Placementu ---
+    pl_new = App.Placement(base_new, rot_new)
+    ipl_new = pl_new.inverse()
+    p1_local_new = ipl_new.multVec(p1_global)
+    p2_local_new = ipl_new.multVec(p2_global)
+
+    # Draft Line preferuje Start/End; jeśli brak, użyj Points
+    try:
+        obj.Start = p1_local_new
+        obj.End   = p2_local_new
+    except Exception:
+        try:
+            obj.Points = [p1_local_new, p2_local_new]
+        except Exception:
+            pass
+
+    obj.Placement = pl_new
+
+doc.recompute()
+print("Gotowe: wszystkie zaznaczone linie przeniesione, wypalony Placement, oś Z wzdłuż linii.")

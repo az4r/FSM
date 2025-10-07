@@ -1,0 +1,77 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtCore
+
+doc = App.ActiveDocument
+if not doc:
+    raise Exception("Brak aktywnego dokumentu.")
+
+# --- Funkcja z WYZWALACZ.txt ---
+def wait_for_new_draft_line(set_before, timeout_s):
+    Gui.activateWorkbench("DraftWorkbench")
+    Gui.runCommand('Draft_Line', 0)
+
+    loop = QtCore.QEventLoop()
+    deadline = QtCore.QTime.currentTime().addSecs(timeout_s)
+    found_obj = [None]
+
+    def check_new():
+        if QtCore.QTime.currentTime() > deadline:
+            loop.quit()
+            return
+        for obj in doc.Objects:
+            if obj.Name not in set_before:
+                shp = getattr(obj, "Shape", None)
+                if shp and hasattr(shp, "Edges") and shp.Edges and len(shp.Vertexes) == 2:
+                    found_obj[0] = obj
+                    loop.quit()
+                    return
+        QtCore.QTimer.singleShot(200, check_new)
+
+    QtCore.QTimer.singleShot(200, check_new)
+    loop.exec_()
+    return found_obj[0]
+
+# --- Wypalanie Placementu ---
+def wypal_placement_linii(obj):
+    if not hasattr(obj, "Shape") or len(obj.Shape.Vertexes) < 2:
+        raise ValueError(f"{obj.Label}: brak geometrii linii.")
+    p1_global = obj.Shape.Vertexes[0].Point
+    p2_global = obj.Shape.Vertexes[1].Point
+    obj.Placement = App.Placement()
+    axis_z = (p2_global - p1_global).normalize()
+    helper = App.Vector(1,0,0) if abs(axis_z.dot(App.Vector(0,0,1))) > 0.99 else App.Vector(0,0,1)
+    axis_x = helper.cross(axis_z).normalize()
+    axis_y = axis_z.cross(axis_x).normalize()
+    rot_new = App.Rotation(axis_x, axis_y, axis_z)
+    base_new = p1_global
+    pl_new = App.Placement(base_new, rot_new)
+    ipl_new = pl_new.inverse()
+    p1_local_new = ipl_new.multVec(p1_global)
+    p2_local_new = ipl_new.multVec(p2_global)
+    try:
+        obj.Start = p1_local_new
+        obj.End   = p2_local_new
+    except Exception:
+        try:
+            obj.Points = [p1_local_new, p2_local_new]
+        except Exception:
+            pass
+    obj.Placement = pl_new
+
+# --- Główna procedura ---
+set_before = set(o.Name for o in doc.Objects)
+new_line = wait_for_new_draft_line(set_before, 180)
+if not new_line:
+    raise Exception("Nie wykryto nowej linii w wyznaczonym czasie.")
+
+# zaznacz nową linię
+Gui.Selection.clearSelection()
+Gui.Selection.addSelection(new_line)
+
+# wypal Placement
+wypal_placement_linii(new_line)
+doc.recompute()
+print(f"Gotowe: wypalono Placement dla {new_line.Label}")
+
+Gui.activateWorkbench("ArchWorkbench")

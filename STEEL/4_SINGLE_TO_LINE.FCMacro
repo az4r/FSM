@@ -1,0 +1,148 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Draft
+from PySide import QtGui
+import os
+
+# --- Funkcja wypalania placementu linii (oś Z wzdłuż linii, Base = początek, Start/End lokalnie) ---
+def wypal_placement_linii(line_obj):
+    if not hasattr(line_obj, "Shape") or len(line_obj.Shape.Vertexes) < 2:
+        raise ValueError(f"{line_obj.Label}: obiekt nie ma geometrii linii (min. 2 wierzchołki).")
+
+    # globalne punkty z aktualnego kształtu
+    p1_global = line_obj.Shape.Vertexes[0].Point
+    p2_global = line_obj.Shape.Vertexes[1].Point
+
+    # lokalne osie: Z wzdłuż linii, X/Y prostopadłe
+    axis_z = (p2_global - p1_global).normalize()
+    helper  = App.Vector(1,0,0) if abs(axis_z.dot(App.Vector(0,0,1))) > 0.99 else App.Vector(0,0,1)
+    axis_x  = helper.cross(axis_z).normalize()
+    axis_y  = axis_z.cross(axis_x).normalize()
+
+    rot_new  = App.Rotation(axis_x, axis_y, axis_z)
+    base_new = p1_global
+    pl_new   = App.Placement(base_new, rot_new)
+
+    # przeliczenie punktów do lokalnego układu nowego Placementu
+    ipl_new        = pl_new.inverse()
+    p1_local_new   = ipl_new.multVec(p1_global)
+    p2_local_new   = ipl_new.multVec(p2_global)
+
+    # Draft Line preferuje Start/End; jeśli brak, użyj Points
+    try:
+        line_obj.Start = p1_local_new
+        line_obj.End   = p2_local_new
+    except Exception:
+        try:
+            line_obj.Points = [p1_local_new, p2_local_new]
+        except Exception:
+            pass
+
+    line_obj.Placement = pl_new
+
+doc = App.ActiveDocument
+selection = Gui.Selection.getSelection()
+if not selection:
+    raise Exception("Nie zaznaczono żadnych obiektów.")
+
+# 1) Ustal katalog SINGLE względem zapisanego dokumentu
+if not doc.FileName:
+    raise Exception("Zapisz dokument, aby makro znało katalog roboczy.")
+base_dir   = os.path.dirname(doc.FileName)
+single_dir = os.path.join(base_dir, "SINGLE")
+
+# 2) Zbierz unikalne prefiksy w formacie "1000_"
+prefixes = set()
+for obj in selection:
+    lbl = obj.Label
+    if "_" in lbl:
+        prefixes.add(lbl.split("_")[0] + "_")
+    else:
+        prefixes.add(lbl)
+
+# 3) Funkcja wykrywająca obiekty A2Plus
+def isA2plus(o):
+    props = [p.lower() for p in o.PropertiesList]
+    # mają właściwość plikową
+    if "filename" in props or "file_name" in props:
+        val = getattr(o, "Filename", None) or getattr(o, "FileName", None) or getattr(o, "file_name", None)
+        if val:
+            return True
+    # albo mają bryły/ściany – linie tego nie mają
+    try:
+        s = o.Shape
+        if hasattr(s, "Solids") and len(s.Solids) > 0:
+            return True
+        if hasattr(s, "Faces")  and len(s.Faces)  > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+# 4) Konwersja A2Plus → linie Draft
+created_lines = []
+count = 0
+for obj in selection:
+    lbl = obj.Label
+    edges = obj.Shape.Edges
+    if not edges:
+        print(f"Pomijam {lbl}, brak krawędzi.")
+        continue
+
+    # a) oś belki po najdłuższej krawędzi
+    longest = max(edges, key=lambda e: e.Length)
+    p0, p1 = longest.Vertexes[0].Point, longest.Vertexes[1].Point
+    axis   = (p1 - p0).normalize()
+    length = longest.Length
+
+    # b) lokalne osie Y, Z
+    up = App.Vector(0,0,1)
+    if abs(axis.dot(up)) > 0.99:
+        up = App.Vector(0,1,0)
+    y_loc = axis.cross(up).normalize()
+    z_loc = axis.cross(y_loc).normalize()
+
+    # c) projekcja wierzchołków → środek przekroju
+    pts = [((v.Point-p0).dot(y_loc), (v.Point-p0).dot(z_loc))
+           for e in edges for v in e.Vertexes]
+    ys, zs = zip(*pts)
+    yc, zc = (min(ys)+max(ys))/2.0, (min(zs)+max(zs))/2.0
+    center = p0 + y_loc.multiply(yc) + z_loc.multiply(zc)
+
+    # d) usuwamy oryginał i tworzymy linię
+    doc.removeObject(obj.Name)
+    line = Draft.makeLine(center, center + axis.multiply(length))
+    line.Label = lbl
+    created_lines.append(line)
+    count += 1
+
+doc.recompute()
+print(f"Zamieniono {count} obiekt(ów) na linie w środku przekroju.")
+
+# --- Wypalanie placementu dla wszystkich nowo utworzonych linii (na końcu) ---
+for line in created_lines:
+    try:
+        wypal_placement_linii(line)
+    except Exception as e:
+        print(f"{line.Label}: nie udało się wypalić Placementu – {e}")
+
+doc.recompute()
+
+# 5) Dla każdego prefiksu – jeśli nie ma już A2Plus, kasujemy plik {prefix_nr}.FCStd
+for pref in prefixes:
+    # czy wciąż jest choć jeden A2Plus?
+    left = [o for o in doc.Objects if o.Label.startswith(pref) and isA2plus(o)]
+    if left:
+        continue
+
+    # wyciągamy numer bez podkreślenia, np. "1000"
+    num = pref.rstrip("_")
+    file_fcstd = os.path.join(single_dir, f"{num}.FCStd")
+    if os.path.isfile(file_fcstd):
+        try:
+            os.remove(file_fcstd)
+            print(f"Usunięto plik SINGLE: {file_fcstd}")
+        except Exception as e:
+            print(f"Nie udało się usunąć {file_fcstd}: {e}")
+    else:
+        print(f"Brak pliku do usunięcia: {file_fcstd}")

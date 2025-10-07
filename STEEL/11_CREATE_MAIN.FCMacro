@@ -1,0 +1,169 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os, re
+import a2p_importpart
+from FreeCAD import Vector
+from PySide import QtGui
+
+doc = App.ActiveDocument
+if not doc or not doc.FileName:
+    raise RuntimeError("Zapisz dokument główny przed uruchomieniem makra.")
+
+base_dir = os.path.dirname(doc.FileName)
+main_dir = os.path.join(base_dir, "MAIN")
+os.makedirs(main_dir, exist_ok=True)
+
+# --- 1) Okienko wyboru prefiksu początkowego ---
+start_num, ok = QtGui.QInputDialog.getInt(
+    None, "Prefiks początkowy",
+    "Podaj trzycyfrowy prefiks startowy (np. 100):",
+    100, 0, 999, 1
+)
+if not ok:
+    raise SystemExit
+
+# --- Funkcje pomocnicze ---
+def total_edge_length(obj):
+    if not hasattr(obj, "Shape") or obj.Shape.isNull():
+        return 0.0
+    return sum(edge.Length for edge in obj.Shape.Edges)
+
+def make_signature_from_list(objs, ndigits=3):
+    lengths = [round(total_edge_length(o), ndigits) for o in objs if hasattr(o,"Shape") and not o.Shape.isNull()]
+    lengths.sort()
+    return f"{len(lengths)}|" + ",".join(f"{l:.{ndigits}f}" for l in lengths)
+
+def make_signature(selection, ndigits=3):
+    return make_signature_from_list(selection, ndigits)
+
+def extract_object_list(fcstd_path, ndigits=3):
+    """Zwraca listę (etykieta_bez_sufiksu, długość) dla obiektów w pliku"""
+    try:
+        td = App.openDocument(fcstd_path)
+    except Exception:
+        return []
+    try:
+        objs = []
+        for o in td.Objects:
+            if hasattr(o,"Shape") and not o.Shape.isNull():
+                length = round(total_edge_length(o), ndigits)
+                base_label = o.Label.split("_")[0] if "_" in o.Label else o.Label
+                objs.append((base_label, length))
+        objs.sort()
+        return objs
+    finally:
+        App.closeDocument(td.Name)
+
+def pick_next_prefix(start, used):
+    p = start
+    while p in used:
+        p += 1
+    used.add(p)
+    return p
+
+# --- 2) Wyszukiwanie już użytych etykiet i prefiksów ---
+pat = re.compile(r"^(\d{3})_(\d{3})$")
+used_labels = set()
+used_prefixes = set()
+for o in doc.Objects:
+    label = o.Label or ""
+    if pat.match(label):
+        used_labels.add(label)
+        try:
+            used_prefixes.add(int(label.split("_")[0]))
+        except: pass
+
+# --- 3) Pobranie zaznaczonych elementów ---
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise RuntimeError("Zaznacz elementy pojedyncze do złożenia.")
+
+# --- 4) Obliczenie bounding box ---
+shapes = [o.Shape for o in sel if hasattr(o,"Shape") and not o.Shape.isNull()]
+bbox = shapes[0].BoundBox
+for s in shapes[1:]:
+    bbox.add(s.BoundBox)
+center_x = (bbox.XMin+bbox.XMax)/2.0
+center_y = (bbox.YMin+bbox.YMax)/2.0
+orig_center_xy = Vector(center_x,center_y,0)
+orig_zmin = bbox.ZMin
+
+# --- 5) Utworzenie roboczego dokumentu wysyłkowego ---
+ship_doc = App.newDocument("Shipment_tmp")
+for obj in sel:
+    source_file = getattr(obj,"sourceFile",None) or getattr(obj,"SourceFile",None)
+    if not source_file:
+        raise RuntimeError(f"{obj.Label}: brak sourceFile")
+    abs_path = os.path.normpath(os.path.join(base_dir, source_file))
+    root = a2p_importpart.importPartFromFile(ship_doc, abs_path)
+    part_obj = root
+    for c in getattr(root,"OutList",[]):
+        if getattr(c,"Shape",None) and not c.Shape.isNull():
+            part_obj = c
+            break
+    pl = obj.Placement
+    delta = Vector(-center_x,-center_y,0)
+    part_obj.Placement = App.Placement(pl.Base+delta, pl.Rotation)
+    part_obj.Label = obj.Label
+ship_doc.recompute()
+
+tmp_file = os.path.join(main_dir,"X_tmp.FCStd")
+ship_doc.saveAs(tmp_file)
+App.closeDocument(ship_doc.Name)
+
+# --- 6) Porównanie z istniejącymi ---
+sig_tmp = make_signature(sel)
+list_tmp = extract_object_list(tmp_file)
+
+matched_pref = None
+for fname in os.listdir(main_dir):
+    if not fname.endswith(".FCStd") or fname.startswith("X_"):
+        continue
+    pref = int(os.path.splitext(fname)[0])
+    fcstd_path = os.path.join(main_dir,fname)
+    objs = extract_object_list(fcstd_path)
+    sig_file = f"{len(objs)}|" + ",".join(f"{l:.3f}" for _,l in objs)
+    if sig_file == sig_tmp:
+        if objs == list_tmp:
+            matched_pref = pref
+            break
+
+if matched_pref is not None:
+    os.remove(tmp_file)
+    pref_for_sel = matched_pref
+    out_file = os.path.join(main_dir,f"{pref_for_sel:03d}.FCStd")
+else:
+    pref_for_sel = pick_next_prefix(start_num, used_prefixes)
+    out_file = os.path.join(main_dir,f"{pref_for_sel:03d}.FCStd")
+    if os.path.exists(out_file):
+        try:
+            os.remove(out_file)
+            App.Console.PrintMessage(f"Usunięto stary plik {out_file}, aby zapisać nowy.\n")
+        except Exception as e:
+            raise RuntimeError(f"Nie udało się usunąć istniejącego pliku {out_file}: {e}")
+    os.rename(tmp_file, out_file)
+
+
+# --- 7) Import do modelu ---
+idx = 1
+while f"{pref_for_sel:03d}_{idx:03d}" in used_labels:
+    idx += 1
+new_label = f"{pref_for_sel:03d}_{idx:03d}"
+
+root = a2p_importpart.importPartFromFile(doc, out_file)
+root.Label = new_label
+
+# --- 8) Ustawienie pozycji ---
+bb_new = root.Shape.BoundBox
+delta_z = orig_zmin - bb_new.ZMin
+root.Placement.Base = Vector(orig_center_xy.x, orig_center_xy.y, root.Placement.Base.z+delta_z)
+
+doc.recompute()
+
+# usuń oryginalne elementy
+for obj in sel:
+    doc.removeObject(obj.Name)
+
+App.Console.PrintMessage(
+    f"Utworzono element wysyłkowy {new_label} (prefiks {pref_for_sel:03d}) i zaimportowano do modelu.\n"
+)

@@ -1,0 +1,95 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os
+import a2p_importpart
+
+doc = App.ActiveDocument
+if not doc or not doc.FileName:
+    raise RuntimeError("Zapisz dokument główny przed uruchomieniem makra.")
+base_dir = os.path.dirname(doc.FileName)
+
+# --- Pomocnicze: wykryj typ po zawartości pliku ---
+def is_single_part(fcstd_path):
+    """True, gdy plik ma dokładnie jedną geometrię i zero importów."""
+    try:
+        td = App.openDocument(fcstd_path)
+        shapes = [o for o in td.Objects if hasattr(o, "Shape") and not o.Shape.isNull()]
+        imports = [o for o in td.Objects if hasattr(o, "SourceFile")]
+        App.closeDocument(td.Name)
+        return len(shapes) == 1 and len(imports) == 0
+    except Exception:
+        return False
+
+# --- 1) Pobierz zaznaczenie ---
+sel = Gui.Selection.getSelection()
+if len(sel) != 2:
+    raise RuntimeError("Zaznacz dokładnie dwa obiekty: element pojedynczy i element wysyłkowy.")
+
+pairs = []
+for o in sel:
+    sf = getattr(o, "sourceFile", None) or getattr(o, "SourceFile", None)
+    if not sf:
+        raise RuntimeError(f"{o.Label}: brak właściwości sourceFile – wybierz obiekty A2plus.")
+    abs_path = os.path.normpath(os.path.join(base_dir, sf))
+    if not os.path.isfile(abs_path):
+        raise RuntimeError(f"Nie znaleziono pliku: {abs_path}")
+    pairs.append((o, abs_path))
+
+# --- 2) Rozpoznaj kto jest single, a kto shipment ---
+if is_single_part(pairs[0][1]):
+    single_obj, single_path = pairs[0]
+    shipment_obj, shipment_path = pairs[1]
+else:
+    single_obj, single_path = pairs[1]
+    shipment_obj, shipment_path = pairs[0]
+
+# upewnij się, że shipment_path to faktyczny plik kontenera
+shipment_path = os.path.normpath(os.path.join(base_dir, getattr(shipment_obj, "sourceFile", None) or getattr(shipment_obj, "SourceFile", None)))
+if not os.path.isfile(shipment_path):
+    raise RuntimeError(f"Nie znaleziono pliku wysyłkowego: {shipment_path}")
+
+# --- 3) Otwórz plik wysyłkowy i importuj pojedynczy ---
+ship_doc = App.openDocument(shipment_path)
+
+root = a2p_importpart.importPartFromFile(ship_doc, single_path)
+if root is None:
+    raise RuntimeError(f"Nie udało się zaimportować {single_path}")
+
+# wybierz obiekt z geometrią (często to dziecko root)
+part_obj = root
+for c in getattr(root, "OutList", []):
+    if getattr(c, "Shape", None) and not c.Shape.isNull():
+        part_obj = c
+        break
+
+# --- 4) Przelicz Placement: P_internal = inv(Placement_kontenera) ∘ P_single ---
+inv_cont = shipment_obj.Placement.inverse()
+new_rot = inv_cont.Rotation.multiply(single_obj.Placement.Rotation)
+new_base = inv_cont.multVec(single_obj.Placement.Base)
+part_obj.Placement = App.Placement(new_base, new_rot)
+
+# zachowaj etykietę
+part_obj.Label = single_obj.Label
+
+ship_doc.recompute()
+ship_doc.save()
+App.closeDocument(ship_doc.Name)
+
+App.Console.PrintMessage(
+    f"Dodano {single_obj.Label} do {shipment_obj.Label} (Placement przeniesiony do układu wewnętrznego).\n"
+)
+
+# --- 5) Odśwież importy w głównym modelu ---
+try:
+    a2p_importpart.updateImportedParts(doc)
+    App.Console.PrintMessage("Zaktualizowano importy w głównym modelu (A2plus).\n")
+except Exception as e:
+    App.Console.PrintError(f"Nie udało się automatycznie odświeżyć importów: {e}\n")
+
+# --- 6) Usuń element pojedynczy z głównego modelu ---
+try:
+    doc.removeObject(single_obj.Name)
+    doc.recompute()
+    App.Console.PrintMessage(f"Usunięto {single_obj.Label} z głównego modelu (przeniesiony do wysyłkowego).\n")
+except Exception as e:
+    App.Console.PrintError(f"Nie udało się usunąć {single_obj.Label}: {e}\n")

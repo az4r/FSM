@@ -1,0 +1,82 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os, re, shutil
+
+doc = App.ActiveDocument
+if not doc or not doc.FileName:
+    raise RuntimeError("Zapisz dokument, aby znać katalog roboczy.")
+
+sel = Gui.Selection.getSelection()
+if not sel:
+    raise RuntimeError("Zaznacz co najmniej jeden element wysyłkowy w modelu.")
+
+# --- Wyszukiwanie użytych prefiksów trzycyfrowych ---
+pat = re.compile(r"^(\d{3})_(\d{3})$")
+used_prefixes = set()
+for o in doc.Objects:
+    m = pat.match(o.Label or "")
+    if m:
+        used_prefixes.add(int(m.group(1)))
+
+doc_dir = os.path.dirname(doc.FileName)
+main_dir = os.path.join(doc_dir, "MAIN")
+os.makedirs(main_dir, exist_ok=True)
+
+for src_obj in sel:
+    # --- Szukanie właściwości SourceFile ---
+    source_file = None
+    for prop in src_obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            source_file = src_obj.getPropertyByName(prop)
+            break
+
+    if not source_file:
+        App.Console.PrintError(f"Obiekt {src_obj.Label} nie ma właściwości 'SourceFile'.\n")
+        continue
+
+    # --- Obsługa ścieżki względnej/absolutnej ---
+    is_relative = not os.path.isabs(source_file)
+    if is_relative:
+        abs_source_file = os.path.normpath(os.path.join(doc_dir, source_file))
+    else:
+        abs_source_file = source_file
+
+    if not os.path.isfile(abs_source_file):
+        App.Console.PrintError(f"Nie znaleziono pliku źródłowego: {abs_source_file}\n")
+        continue
+
+    # --- Znalezienie pierwszego wolnego prefiksu ---
+    prefix_num = 100
+    while prefix_num in used_prefixes:
+        prefix_num += 1
+        if prefix_num > 999:
+            raise RuntimeError("Brak wolnych prefiksów.")
+    used_prefixes.add(prefix_num)
+    prefix_str = f"{prefix_num:03d}"
+
+    # --- Utworzenie nowej nazwy pliku ---
+    new_name = f"{prefix_str}.FCStd"
+    new_path_abs = os.path.join(main_dir, new_name)
+    shutil.copy2(abs_source_file, new_path_abs)
+
+    new_source_value = os.path.relpath(new_path_abs, doc_dir)
+
+    App.Console.PrintMessage(f"Utworzono kopię pliku: {new_path_abs}\n")
+
+    # --- Utworzenie nowego obiektu ---
+    new_obj = doc.copyObject(src_obj, False)
+    new_obj.Label = f"{prefix_str}_001"
+
+    # --- Podmiana ścieżki ---
+    for prop in new_obj.PropertiesList:
+        norm = prop.lower().replace(" ", "").replace("_", "")
+        if norm == "sourcefile":
+            setattr(new_obj, prop, new_source_value)
+            break
+
+    # --- Usunięcie starego obiektu ---
+    doc.removeObject(src_obj.Name)
+
+doc.recompute()
+App.Console.PrintMessage("Przetwarzanie zaznaczonych elementów wysyłkowych zakończone.\n")
