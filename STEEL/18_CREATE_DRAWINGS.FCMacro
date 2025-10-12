@@ -112,8 +112,8 @@ def create_drawings_for_main(doc, template_name, scale_str):
                 page.Template = template
 
                 # --- Obliczenie odsunięć na podstawie skali i max wymiaru ---
-                max_dim = 6000.0  # mm (maksymalny wymiar elementu wysyłkowego)
-                margin = 1.0      # mm (dodatkowy margines)
+                max_dim = 3000.0  # mm (maksymalny wymiar elementu wysyłkowego)
+                margin = 30.0      # mm (dodatkowy margines)
                 view_size = max_dim * scale_val
 
                 offset_y = view_size/2 + margin
