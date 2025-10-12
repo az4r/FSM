@@ -1,19 +1,60 @@
 import FreeCAD as App, os
 import a2p_importpart
+import TechDraw
+from PySide2 import QtWidgets
 
 # --- Funkcje pomocnicze ---
 def log(msg):
     App.Console.PrintMessage(msg + "\n")
 
 def get_project_dir():
-    """Zwraca katalog projektu na podstawie aktywnego dokumentu"""
     if App.ActiveDocument and App.ActiveDocument.FileName:
         return os.path.dirname(App.ActiveDocument.FileName)
     else:
         raise Exception("Brak aktywnego dokumentu z zapisaną ścieżką")
 
+def list_templates():
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    if not os.path.isdir(tpl_dir):
+        log(f"!!! Nie znaleziono katalogu Templates: {tpl_dir}")
+        return []
+    return [f for f in os.listdir(tpl_dir) if f.lower().endswith(".svg")]
+
+def select_template_and_scale():
+    """Okienko dialogowe: wybór skali i szablonu"""
+    files = list_templates()
+    if not files:
+        return None, None
+
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Ustawienia rysunku TechDraw")
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    # Skala
+    scale_layout = QtWidgets.QHBoxLayout()
+    scale_label = QtWidgets.QLabel("Skala:")
+    scale_combo = QtWidgets.QComboBox()
+    scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
+    scale_layout.addWidget(scale_label)
+    scale_layout.addWidget(scale_combo)
+    layout.addLayout(scale_layout)
+
+    # Szablon
+    tpl_label = QtWidgets.QLabel("Szablon:")
+    tpl_combo = QtWidgets.QComboBox()
+    tpl_combo.addItems(files)
+    layout.addWidget(tpl_label)
+    layout.addWidget(tpl_combo)
+
+    # Przycisk OK
+    btn_ok = QtWidgets.QPushButton("OK")
+    layout.addWidget(btn_ok)
+    btn_ok.clicked.connect(dlg.accept)
+
+    dlg.exec_()
+    return tpl_combo.currentText(), scale_combo.currentText()
+
 def create_assembly(docname, src_dir, draw_dir):
-    """Tworzy dokument zbiorczy i importuje do niego wszystkie pliki z katalogu src_dir"""
     doc = App.newDocument(docname)
     App.setActiveDocument(doc.Name)
     App.ActiveDocument = doc
@@ -30,7 +71,7 @@ def create_assembly(docname, src_dir, draw_dir):
     for f in files:
         filepath = os.path.join(src_dir, f)
         try:
-            root = a2p_importpart.importPartFromFile(doc, filepath)  # ← poprawna funkcja
+            root = a2p_importpart.importPartFromFile(doc, filepath)
             if root:
                 root.Placement.Base.x = offset
                 log(f">>> Zaimportowano {f} na X={offset}")
@@ -43,6 +84,71 @@ def create_assembly(docname, src_dir, draw_dir):
     log(f">>> Utworzono {docname} z {len(files)} plików")
     return doc
 
+def create_drawings_for_main(doc, template_name, scale_str):
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    tpl_path = os.path.join(tpl_dir, template_name)
+    if not os.path.isfile(tpl_path):
+        log(f"!!! Nie znaleziono szablonu: {tpl_path}")
+        return
+
+    # Skala jako liczba (np. "1:50" -> 0.02)
+    try:
+        num, den = scale_str.split(":")
+        scale_val = float(num) / float(den)
+    except:
+        scale_val = 1.0
+
+    log(f"--- Dokument {doc.Label} zawiera {len(doc.Objects)} obiektów ---")
+    for obj in doc.Objects:
+        log(f"Obiekt: {obj.Label}, TypeId={obj.TypeId}")
+
+    for obj in doc.Objects:
+        if obj.TypeId in ("App::Part", "Part::FeaturePython"):
+            try:
+                template = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_{obj.Label}")
+                template.Template = tpl_path
+
+                page = doc.addObject('TechDraw::DrawPage', f"Page_{obj.Label}")
+                page.Template = template
+
+                # Widok XY
+                view_xy = doc.addObject('TechDraw::DrawViewPart', f"ViewXY_{obj.Label}")
+                view_xy.Source = [obj]
+                view_xy.Direction = (0,0,1)
+                view_xy.ScaleType = "Custom"
+                view_xy.Scale = scale_val
+                view_xy.X = -120
+                view_xy.Y = 80
+                page.addView(view_xy)
+
+                # Widok XZ
+                view_xz = doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{obj.Label}")
+                view_xz.Source = [obj]
+                view_xz.Direction = (0,1,0)
+                view_xz.ScaleType = "Custom"
+                view_xz.Scale = scale_val
+                view_xz.X = 120
+                view_xz.Y = 80
+                page.addView(view_xz)
+
+                # Widok izometryczny
+                view_iso = doc.addObject('TechDraw::DrawViewPart', f"ViewISO_{obj.Label}")
+                view_iso.Source = [obj]
+                view_iso.Direction = (1,1,1)
+                view_iso.ScaleType = "Custom"
+                view_iso.Scale = scale_val
+                view_iso.X = 0
+                view_iso.Y = -80
+                page.addView(view_iso)
+
+                log(f">>> Utworzono rysunek dla {obj.Label} w skali {scale_str}")
+
+            except Exception as e:
+                log(f"!!! Błąd przy tworzeniu rysunku dla {obj.Label}: {e}")
+
+    doc.recompute()
+    doc.save()
+
 # --- Główna logika ---
 try:
     proj_dir   = get_project_dir()
@@ -52,8 +158,20 @@ try:
     os.makedirs(draw_dir, exist_ok=True)
 
     log("=== START CREATE_DRAWINGS ===")
+
     create_assembly("SINGLE_ASSEMBLY", single_dir, draw_dir)
-    create_assembly("MAIN_ASSEMBLY", main_dir, draw_dir)
+    main_doc = create_assembly("MAIN_ASSEMBLY", main_dir, draw_dir)
+
+    if main_doc:
+        log("=== START CREATE_DRAWINGS (MAIN_ASSEMBLY) ===")
+        chosen_tpl, chosen_scale = select_template_and_scale()
+        if chosen_tpl and chosen_scale:
+            log(f"Wybrano szablon: {chosen_tpl}, skala: {chosen_scale}")
+            create_drawings_for_main(main_doc, chosen_tpl, chosen_scale)
+        else:
+            log("!!! Nie wybrano szablonu lub skali – pomijam generowanie rysunków")
+        log("=== KONIEC CREATE_DRAWINGS (MAIN_ASSEMBLY) ===")
+
     log("=== KONIEC CREATE_DRAWINGS ===")
 
 except Exception as e:
