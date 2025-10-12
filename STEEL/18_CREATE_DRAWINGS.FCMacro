@@ -152,12 +152,22 @@ def create_drawings_for_main(doc, template_name, scale_str):
                 # --- Centrowanie całego układu ---
                 pw = float(template.Width)
                 ph = float(template.Height)
-                cx = pw/2
-                cy = ph/2
+                page_center_x = pw / 2
+                page_center_y = ph / 2
+
+                # środek układu w poziomie (XY i ISO)
+                min_x = min(float(view_xy.X), float(view_iso.X))
+                max_x = max(float(view_xy.X), float(view_iso.X))
+                center_group_x = (min_x + max_x) / 2
+
+                # przesunięcie
+                dx = page_center_x - center_group_x
+                dy = page_center_y
 
                 for v in [view_xy, view_xz, view_iso]:
-                    v.X = float(v.X) + cx
-                    v.Y = float(v.Y) + cy
+                    v.X = float(v.X) + dx
+                    v.Y = float(v.Y) + dy
+
 
                 log(f">>> Utworzono rysunek dla {obj.Label} w skali {scale_str}")
 
