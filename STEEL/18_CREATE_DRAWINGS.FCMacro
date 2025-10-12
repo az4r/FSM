@@ -111,35 +111,49 @@ def create_drawings_for_main(doc, template_name, scale_str):
                 page = doc.addObject('TechDraw::DrawPage', f"Page_{obj.Label}")
                 page.Template = template
 
-                # Widok XY
+                # --- Układ lokalny (wokół (0,0)) ---
+                offset_y = 100
+                offset_x = 200
+
+                # Widok XY (u góry)
                 view_xy = doc.addObject('TechDraw::DrawViewPart', f"ViewXY_{obj.Label}")
                 view_xy.Source = [obj]
                 view_xy.Direction = (0,0,1)
                 view_xy.ScaleType = "Custom"
                 view_xy.Scale = scale_val
-                view_xy.X = -120
-                view_xy.Y = 80
                 page.addView(view_xy)
+                view_xy.X = 0
+                view_xy.Y = offset_y
 
-                # Widok XZ
+                # Widok XZ (poniżej XY)
                 view_xz = doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{obj.Label}")
                 view_xz.Source = [obj]
                 view_xz.Direction = (0,1,0)
                 view_xz.ScaleType = "Custom"
                 view_xz.Scale = scale_val
-                view_xz.X = 120
-                view_xz.Y = 80
                 page.addView(view_xz)
+                view_xz.X = 0
+                view_xz.Y = -offset_y
 
-                # Widok izometryczny
+                # Widok ISO (na prawo od XZ)
                 view_iso = doc.addObject('TechDraw::DrawViewPart', f"ViewISO_{obj.Label}")
                 view_iso.Source = [obj]
                 view_iso.Direction = (1,1,1)
                 view_iso.ScaleType = "Custom"
                 view_iso.Scale = scale_val
-                view_iso.X = 0
-                view_iso.Y = -80
                 page.addView(view_iso)
+                view_iso.X = offset_x
+                view_iso.Y = -offset_y
+
+                # --- Centrowanie całego układu ---
+                pw = float(template.Width)
+                ph = float(template.Height)
+                cx = pw/2
+                cy = ph/2
+
+                for v in [view_xy, view_xz, view_iso]:
+                    v.X = float(v.X) + cx
+                    v.Y = float(v.Y) + cy
 
                 log(f">>> Utworzono rysunek dla {obj.Label} w skali {scale_str}")
 
