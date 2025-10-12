@@ -111,9 +111,13 @@ def create_drawings_for_main(doc, template_name, scale_str):
                 page = doc.addObject('TechDraw::DrawPage', f"Page_{obj.Label}")
                 page.Template = template
 
-                # --- Układ lokalny (wokół (0,0)) ---
-                offset_y = 100
-                offset_x = 200
+                # --- Obliczenie odsunięć na podstawie skali i max wymiaru ---
+                max_dim = 6000.0  # mm (maksymalny wymiar elementu wysyłkowego)
+                margin = 1.0      # mm (dodatkowy margines)
+                view_size = max_dim * scale_val
+
+                offset_y = view_size/2 + margin
+                offset_x = view_size + margin
 
                 # Widok XY (u góry)
                 view_xy = doc.addObject('TechDraw::DrawViewPart', f"ViewXY_{obj.Label}")
