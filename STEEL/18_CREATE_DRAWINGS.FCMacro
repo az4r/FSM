@@ -1,0 +1,60 @@
+import FreeCAD as App, os
+import a2p_importpart
+
+# --- Funkcje pomocnicze ---
+def log(msg):
+    App.Console.PrintMessage(msg + "\n")
+
+def get_project_dir():
+    """Zwraca katalog projektu na podstawie aktywnego dokumentu"""
+    if App.ActiveDocument and App.ActiveDocument.FileName:
+        return os.path.dirname(App.ActiveDocument.FileName)
+    else:
+        raise Exception("Brak aktywnego dokumentu z zapisaną ścieżką")
+
+def create_assembly(docname, src_dir, draw_dir):
+    """Tworzy dokument zbiorczy i importuje do niego wszystkie pliki z katalogu src_dir"""
+    doc = App.newDocument(docname)
+    App.setActiveDocument(doc.Name)
+    App.ActiveDocument = doc
+
+    doc_path = os.path.join(draw_dir, f"{docname}.FCStd")
+    doc.saveAs(doc_path)
+
+    files = [f for f in os.listdir(src_dir) if f.lower().endswith(".fcstd")]
+    if not files:
+        log(f"!!! Brak plików w katalogu: {src_dir}")
+        return doc
+
+    offset = 0
+    for f in files:
+        filepath = os.path.join(src_dir, f)
+        try:
+            root = a2p_importpart.importPartFromFile(doc, filepath)  # ← poprawna funkcja
+            if root:
+                root.Placement.Base.x = offset
+                log(f">>> Zaimportowano {f} na X={offset}")
+                offset += 30000
+        except Exception as e:
+            log(f"!!! Błąd importu {f}: {e}")
+
+    doc.recompute()
+    doc.save()
+    log(f">>> Utworzono {docname} z {len(files)} plików")
+    return doc
+
+# --- Główna logika ---
+try:
+    proj_dir   = get_project_dir()
+    single_dir = os.path.join(proj_dir, "SINGLE")
+    main_dir   = os.path.join(proj_dir, "MAIN")
+    draw_dir   = os.path.join(proj_dir, "DRAWINGS")
+    os.makedirs(draw_dir, exist_ok=True)
+
+    log("=== START CREATE_DRAWINGS ===")
+    create_assembly("SINGLE_ASSEMBLY", single_dir, draw_dir)
+    create_assembly("MAIN_ASSEMBLY", main_dir, draw_dir)
+    log("=== KONIEC CREATE_DRAWINGS ===")
+
+except Exception as e:
+    log(f"!!! FAIL: {e}")
