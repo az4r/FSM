@@ -5,7 +5,7 @@ from PySide2 import QtWidgets
 
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
 # Tworzy stronę TechDraw z siatką widoków SINGLE oraz tabelą BOM.
-# Pozycja tabeli jest zapisywana deterministycznie: ViewObject.X/Y, object.X/Y i Placement.Base.x/y.
+# Zmiany: merge A1:I1 i CellEnd = I(last_row+1).
 
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
@@ -47,7 +47,7 @@ def select_template_and_scale():
     dlg.exec_()
     return tpl_combo.currentText(), scale_combo.currentText()
 
-# --- material/density dialogs (unchanged) ---
+# --- material/density dialogs ---
 apply_to_all_mat = False
 global_material = "S355J2"
 apply_to_all_dens = False
@@ -60,22 +60,23 @@ def ask_material(element_label, default="S355J2"):
     dlg = QtWidgets.QDialog()
     dlg.setWindowTitle("Gatunek stali")
     layout = QtWidgets.QVBoxLayout(dlg)
-    lbl = QtWidgets.QLabel(f"Element: {element_label}")
-    lbl.setStyleSheet("font-weight: bold;")
-    layout.addWidget(lbl)
-    h = QtWidgets.QHBoxLayout()
-    lab = QtWidgets.QLabel("Gatunek stali:")
-    ed = QtWidgets.QLineEdit()
-    ed.setText(default)
-    h.addWidget(lab); h.addWidget(ed)
-    layout.addLayout(h)
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+    form_layout = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gatunek stali:")
+    textbox = QtWidgets.QLineEdit()
+    textbox.setText(default)
+    form_layout.addWidget(label)
+    form_layout.addWidget(textbox)
+    layout.addLayout(form_layout)
     cb = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(cb)
     box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
     layout.addWidget(box)
     box.accepted.connect(dlg.accept)
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
-        m = ed.text().strip() or default
+        m = textbox.text().strip() or default
         if cb.isChecked():
             apply_to_all_mat = True
             global_material = m
@@ -89,16 +90,18 @@ def ask_density(element_label, default=7850.0):
     dlg = QtWidgets.QDialog()
     dlg.setWindowTitle("Gęstość stali")
     layout = QtWidgets.QVBoxLayout(dlg)
-    lbl = QtWidgets.QLabel(f"Element: {element_label}")
-    lbl.setStyleSheet("font-weight: bold;")
-    layout.addWidget(lbl)
-    h = QtWidgets.QHBoxLayout()
-    lab = QtWidgets.QLabel("Gęstość stali:")
-    ed = QtWidgets.QLineEdit()
-    ed.setText(str(default))
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+    form_layout = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gęstość stali:")
+    textbox = QtWidgets.QLineEdit()
+    textbox.setText(str(default))
     unit = QtWidgets.QLabel("kg/m³")
-    h.addWidget(lab); h.addWidget(ed); h.addWidget(unit)
-    layout.addLayout(h)
+    form_layout.addWidget(label)
+    form_layout.addWidget(textbox)
+    form_layout.addWidget(unit)
+    layout.addLayout(form_layout)
     cb = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(cb)
     box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
@@ -106,7 +109,7 @@ def ask_density(element_label, default=7850.0):
     box.accepted.connect(dlg.accept)
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
         try:
-            d = float(ed.text().strip())
+            d = float(textbox.text().strip())
         except Exception:
             d = default
         if cb.isChecked():
@@ -290,7 +293,7 @@ def set_view_position_via_viewobject(view, x, y):
         except Exception:
             return False
 
-# --- Główna funkcja tworząca stronę, widoki i tabelę ---
+# --- Main function ---
 def create_single_overview_grid_centered_with_table(main_doc, single_doc, template_name, scale_str, single_data):
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     tpl_path = os.path.join(tpl_dir, template_name)
@@ -308,7 +311,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
     page.Template = template_obj
 
-    # grid parameters
+    # grid params
     max_dim = 3000.0
     margin  = 30.0
     view_size = max_dim * scale_val
@@ -322,8 +325,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         pw = 210.0; ph = 297.0
 
-    left_margin = margin
-    usable_w = pw - 2*left_margin
+    usable_w = pw - 2*margin
     cols_fit = max(1, int(usable_w // offset_x))
     if cols_fit < 1: cols_fit = 1
 
@@ -356,7 +358,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         row = idx // cols_fit
 
         gx = col * offset_x + view_size / 2.0
-        gy = -(row * offset_y + view_size / 2.0)
+        gy = -(row * offset_y + view_size / 2.0)  # stack downward
 
         view = single_doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{pref}")
         view.Source = [src]
@@ -366,16 +368,15 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
         page.addView(view)
 
+        # set temp grid coords
         try:
             view.X = float(gx)
             view.Y = float(gy)
         except Exception:
             set_view_position_via_viewobject(view, gx, gy)
 
-        try:
-            view.recompute()
-        except Exception:
-            pass
+        try: view.recompute()
+        except Exception: pass
 
         created.append(view)
         created_prefs.append(pref)
@@ -384,7 +385,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
     # center group
     if created:
-        xs = []; ys = []
+        xs=[]; ys=[]
         for v in created:
             try:
                 x = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
@@ -412,12 +413,14 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 try:
                     vx = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
                     vy = float(getattr(v, "Y", getattr(v.ViewObject, "Y", 0.0)))
-                    newx = vx + dx; newy = vy + dy
+                    newx = vx + dx
+                    newy = vy + dy
                     if hasattr(v, "ViewObject") and hasattr(v.ViewObject, "X"):
                         v.ViewObject.X = float(newx)
                         v.ViewObject.Y = float(newy)
                     else:
-                        v.X = float(newx); v.Y = float(newy)
+                        v.X = float(newx)
+                        v.Y = float(newy)
                 except Exception:
                     try:
                         set_view_position_via_viewobject(v, vx+dx, vy+dy)
@@ -430,54 +433,105 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         if sheet_name in single_doc.Objects:
             sheet = single_doc.getObject(sheet_name)
             try:
-                sheet.clearAll()
+                # deterministic clear A1..I{max_rows}
+                max_rows = 500
+                cols = ['A','B','C','D','E','F','G','H','I']
+                for r in range(1, max_rows+1):
+                    for c in cols:
+                        try: sheet.set(f"{c}{r}", "")
+                        except Exception: pass
             except Exception:
-                pass
+                try: sheet.clearAll()
+                except Exception: pass
         else:
             sheet = single_doc.addObject("Spreadsheet::Sheet", sheet_name)
 
-        # headers
-        sheet.set("A1", "LISTA ELEMENTÓW POJEDYNCZYCH")
-        sheet.set("A2","Nr"); sheet.set("B2","Nazwa"); sheet.set("C2","Ilość")
-        sheet.set("D2","Długość [mm]"); sheet.set("E2","Szerokość [mm]"); sheet.set("F2","Wysokość [mm]")
-        sheet.set("G2","Gatunek stali"); sheet.set("H2","Waga elementu [kg]"); sheet.set("I2","Waga łącznie [kg]")
+        # headers A1..I2
+        try:
+            sheet.set("A1", "LISTA ELEMENTÓW POJEDYNCZYCH")
+            sheet.set("A2","Nr")
+            sheet.set("B2","Nazwa")
+            sheet.set("C2","Ilość")
+            sheet.set("D2","Długość [mm]")
+            sheet.set("E2","Szerokość [mm]")
+            sheet.set("F2","Wysokość [mm]")
+            sheet.set("G2","Gatunek stali")
+            sheet.set("H2","Waga elementu [kg]")
+            sheet.set("I2","Waga łącznie [kg]")
+        except Exception:
+            pass
+
+        # try to merge A1:I1 (several API variants)
+        try:
+            try:
+                sheet.mergeCells("A1:I1")
+            except Exception:
+                if hasattr(sheet, "mergeRange"):
+                    sheet.mergeRange("A1", "I1")
+                elif hasattr(sheet, "setMergedCells"):
+                    sheet.setMergedCells(["A1:I1"])
+        except Exception as e:
+            log(f"[DEBUG] merge header failed: {e}")
 
         row = 3
         total_weight = 0.0
         for pref in sorted(created_prefs):
             data = single_data.get(pref, {})
-            material = ask_material(pref)
-            density = ask_density(pref)
+            element_label = pref
+            material = ask_material(element_label, "S355J2")
+            density = ask_density(element_label, 7850.0)
             vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
             waga_elem = vol_m3 * density
             waga_total = waga_elem * data.get("ilosc",0)
 
-            sheet.set(f"A{row}", pref)
-            sheet.set(f"B{row}", data.get("nazwa","?"))
-            sheet.set(f"C{row}", str(data.get("ilosc",0)))
-            sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
-            sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
-            sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
-            sheet.set(f"G{row}", material)
-            sheet.set(f"H{row}", f"{waga_elem:.3f}")
-            sheet.set(f"I{row}", f"{waga_total:.3f}")
+            try:
+                sheet.set(f"A{row}", pref)
+                sheet.set(f"B{row}", data.get("nazwa","?"))
+                sheet.set(f"C{row}", str(data.get("ilosc",0)))
+                sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
+                sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
+                sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
+                sheet.set(f"G{row}", material)
+                sheet.set(f"H{row}", f"{waga_elem:.3f}")
+                sheet.set(f"I{row}", f"{waga_total:.3f}")
+            except Exception as e:
+                log(f"[DEBUG] Błąd przy wstawianiu wiersza {row} do {sheet_name}: {e}")
 
             total_weight += waga_total
             row += 1
 
-        sheet.set(f"H{row}", "Całkowita waga [kg]"); sheet.set(f"I{row}", f"{total_weight:.3f}")
+        # summary
+        try:
+            sheet.set(f"H{row}", "Całkowita waga [kg]")
+            sheet.set(f"I{row}", f"{total_weight:.3f}")
+        except Exception:
+            pass
 
         try: single_doc.recompute()
         except Exception: pass
 
-        # determine last row for table range
-        last_row = row - 1
-        cell_start = "A1"; cell_end = f"I{last_row}"
+        # determine last row with data (we will include summary row in table range)
+        last_row = 2
+        try:
+            r = 3
+            while True:
+                val = sheet.get(f"A{r}")
+                if val is None or str(val).strip() == "":
+                    break
+                last_row = r
+                r += 1
+        except Exception:
+            pass
+
+        # include summary row -> cell_end = I{last_row + 1}
+        cell_start = "A1"
+        cell_end = f"I{last_row + 1}"
 
         table_view = single_doc.addObject("TechDraw::DrawViewSpreadsheet", "Table_SingleOverview")
         table_view.Source = sheet
         try:
-            table_view.CellStart = cell_start; table_view.CellEnd = cell_end
+            table_view.CellStart = cell_start
+            table_view.CellEnd = cell_end
         except Exception:
             try:
                 vo = table_view.ViewObject
@@ -494,8 +548,10 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
+        # initial size (will be overridden by computed size)
         try:
-            table_view.Width = 160.0; table_view.Height = 90.0
+            table_view.Width = 160.0
+            table_view.Height = 90.0
         except Exception:
             pass
 
@@ -506,43 +562,44 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         try: single_doc.recompute()
         except Exception: pass
 
-        # estimate table size
-        def sheet_filled_size_local(sheet):
+        # compute table size based on filled cells (ensure we used last_row+1 above)
+        def sheet_filled_size(sheet):
             max_col = 0; max_row = 0
             cols = [chr(c) for c in range(ord('A'), ord('Z')+1)]
             for c_idx, c in enumerate(cols, start=1):
-                found = False
+                found_in_col = False
                 for r in range(1, 2000):
                     try:
                         val = sheet.get(f"{c}{r}")
                     except Exception:
                         val = None
                     if val is not None and str(val).strip() != "":
-                        found = True
+                        found_in_col = True
                         if r > max_row: max_row = r
-                if found: max_col = c_idx
+                if found_in_col: max_col = c_idx
             if max_col == 0 and max_row == 0: return 1,1
             if max_row < 2: max_row = 2
             return max_row, max_col
 
-        filled_rows, filled_cols = sheet_filled_size_local(sheet)
-        if filled_rows < last_row: filled_rows = last_row
+        filled_rows, filled_cols = sheet_filled_size(sheet)
+        # ensure we include summary row in height
+        if filled_rows < (last_row + 1):
+            filled_rows = last_row + 1
         row_height_mm = 6.0; col_width_mm = 25.0
         table_h_mm = filled_rows * row_height_mm
         table_w_mm = filled_cols * col_width_mm
         margin_base = 30.0; safe_offset = 2.0
 
-        # LEFT-BOTTOM center calculation (values które chcesz zapisać)
+        # LEFT-BOTTOM placement center (values to store)
         left_margin = margin_base
         bottom_margin = margin_base
         center_x = left_margin + safe_offset + (table_w_mm / 2.0)
         center_y = bottom_margin + safe_offset + (table_h_mm / 2.0)
 
-        # --- Prosty, deterministyczny zapis pozycji tabeli (dokładnie center_x, center_y) ---
+        # Deterministic write: exactly center_x, center_y to ViewObject, object and Placement.Base
         pos_x = float(center_x)
         pos_y = float(center_y)
 
-        # Prefer ViewObject assignment
         try:
             vo = table_view.ViewObject
         except Exception:
@@ -557,14 +614,12 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             except Exception:
                 pass
 
-        # Fallback: assign directly on object
         try:
             table_view.X = pos_x
             table_view.Y = pos_y
         except Exception:
             pass
 
-        # Also write to Placement.Base (Properties -> Base -> X/Y)
         try:
             pl = getattr(table_view, "Placement", None)
             if pl is not None:
@@ -580,20 +635,18 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
-        # set computed size
         try:
             table_view.Width = table_w_mm
             table_view.Height = table_h_mm
         except Exception:
             pass
 
-        # final update and recompute
         try: table_view.recompute()
         except Exception: pass
         try: single_doc.recompute()
         except Exception: pass
 
-        # log verification
+        # verification log
         stored_x = stored_y = None
         try:
             vo2 = table_view.ViewObject
@@ -615,7 +668,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             except Exception:
                 pass
 
-        log(f"[TABLE] Dodano tabelę BOM_SingleOverview zakres=A1:I{last_row} pos(desired)={pos_x:.2f},{pos_y:.2f} stored={stored_x},{stored_y} size={table_w_mm:.2f}x{table_h_mm:.2f} filled_r={filled_rows} filled_c={filled_cols}")
+        log(f"[TABLE] Dodano tabelę {sheet.Name} zakres={cell_start}:{cell_end} pos(desired)={pos_x:.2f},{pos_y:.2f} stored={stored_x},{stored_y} size={table_w_mm:.2f}x{table_h_mm:.2f} filled_r={filled_rows} filled_c={filled_cols}")
 
     except Exception as e:
         log(f"[TABLE] Błąd podczas tworzenia/pozycjonowania tabeli: {e}")
