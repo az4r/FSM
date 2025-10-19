@@ -4,9 +4,7 @@ import TechDraw
 from PySide2 import QtWidgets
 
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
-# Siatka widoków XZ elementów pojedynczych; start w lewym-górnym narożniku;
-# offsety oparte na logice z 19_CREATE_DRAWINGS_MAIN;
-# po dodaniu widoku przypisuję pozycje przez ViewObject i wymuszam recompute.
+# Tworzy siatkę widoków XZ i centruje całą grupę względem środka strony.
 
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
@@ -200,11 +198,9 @@ def choose_main_document(draw_dir, main_dir):
 def set_view_position_via_viewobject(view, x, y):
     try:
         vo = view.ViewObject
-        # Assign floats to ViewObject.X/Y if present
         if hasattr(vo, "X") and hasattr(vo, "Y"):
             vo.X = float(x)
             vo.Y = float(y)
-            # some ViewObjects need update/redraw
             try:
                 vo.update()
             except Exception:
@@ -212,7 +208,6 @@ def set_view_position_via_viewobject(view, x, y):
             return True
     except Exception:
         pass
-    # fallback to assigning to view.X/view.Y (converted to float)
     try:
         view.X = float(x)
         view.Y = float(y)
@@ -225,7 +220,7 @@ def set_view_position_via_viewobject(view, x, y):
         except Exception:
             return False
 
-def create_single_overview_grid_from_19(main_doc, single_doc, template_name, scale_str, single_data):
+def create_single_overview_grid_centered(main_doc, single_doc, template_name, scale_str, single_data):
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     tpl_path = os.path.join(tpl_dir, template_name)
     if not os.path.isfile(tpl_path):
@@ -235,12 +230,13 @@ def create_single_overview_grid_from_19(main_doc, single_doc, template_name, sca
         num, den = scale_str.split(":"); scale_val = float(num) / float(den)
     except Exception:
         scale_val = 1.0
+
     template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
     template_obj.Template = tpl_path
     page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
     page.Template = template_obj
 
-    # offset logic from 19
+    # grid parameters (same logic as before)
     max_dim = 3000.0
     margin  = 30.0
     view_size = max_dim * scale_val
@@ -259,12 +255,12 @@ def create_single_overview_grid_from_19(main_doc, single_doc, template_name, sca
     cols_fit = max(1, int(usable_w // offset_x))
     if cols_fit < 1: cols_fit = 1
 
-    log(f"[GRID19] pw={pw} ph={ph} scale={scale_val} view_size={view_size} offset_x={offset_x} offset_y={offset_y} cols={cols_fit}")
+    log(f"[GRID] page W={pw} H={ph} scale={scale_val} view_size={view_size} cols={cols_fit}")
 
     created = []
     idx = 0
+    # create views positioned in a local grid coordinate system (group origin at 0,0)
     for pref in sorted(single_data.keys()):
-        # find object in single_doc by prefix or containing pref
         src = None
         for o in single_doc.Objects:
             try:
@@ -287,11 +283,9 @@ def create_single_overview_grid_from_19(main_doc, single_doc, template_name, sca
         col = idx % cols_fit
         row = idx // cols_fit
 
-        center_x_in_cell = view_size / 2.0
-        center_y_in_cell = view_size / 2.0
-
-        raw_x = left_margin + col * offset_x + center_x_in_cell
-        raw_y = ph - (top_margin + row * offset_y + center_y_in_cell)
+        # place initially relative to group origin: center positions as grid coordinates
+        gx = col * offset_x + view_size / 2.0
+        gy = -(row * offset_y + view_size / 2.0)  # negative to stack downward
 
         view = single_doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{pref}")
         view.Source = [src]
@@ -299,42 +293,74 @@ def create_single_overview_grid_from_19(main_doc, single_doc, template_name, sca
         view.ScaleType = "Custom"
         view.Scale = scale_val
 
-        # add view to page first, then set ViewObject positions and recompute view/page
         page.addView(view)
 
-        success = set_view_position_via_viewobject(view, raw_x, raw_y)
-        if not success:
-            log(f"[WARN] Nie udało się ustawić pozycji ViewXZ_{pref} na X={raw_x} Y={raw_y}")
+        # assign the temporary grid coords to view.X/view.Y (we will shift to center group later)
+        # store these as numeric values on the view (works on most TechDraw versions)
+        try:
+            view.X = float(gx)
+            view.Y = float(gy)
+        except Exception:
+            set_view_position_via_viewobject(view, gx, gy)
 
-        # force redraw of view and page
         try:
             view.recompute()
         except Exception:
             pass
-        try:
-            page.recompute()
-        except Exception:
-            pass
-
-        try:
-            vo = view.ViewObject
-            if hasattr(vo, "FontSize"): vo.FontSize = 10
-            if hasattr(vo, "RowHeight"): vo.RowHeight = 6
-            vo.Visibility = True
-        except Exception:
-            pass
 
         created.append(view)
-        # log values as floats (safe)
-        try:
-            vx = float(raw_x); vy = float(raw_y)
-            log(f">>> Dodano ViewXZ_{pref} col={col} row={row} X={vx:.2f} Y={vy:.2f}")
-        except Exception:
-            log(f">>> Dodano ViewXZ_{pref} col={col} row={row} (positions set)")
-
+        log(f">>> Stworzono ViewXZ_{pref} grid col={col} row={row} gx={gx:.2f} gy={gy:.2f}")
         idx += 1
 
-    # final recompute & save
+    # compute bounding box of group in grid coordinates
+    if created:
+        xs = []
+        ys = []
+        for v in created:
+            try:
+                x = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
+                y = float(getattr(v, "Y", getattr(v.ViewObject, "Y", 0.0)))
+                xs.append(x)
+                ys.append(y)
+            except Exception:
+                continue
+        if xs and ys:
+            min_x = min(xs) - view_size/2.0
+            max_x = max(xs) + view_size/2.0
+            min_y = min(ys) - view_size/2.0
+            max_y = max(ys) + view_size/2.0
+            group_center_x = (min_x + max_x) / 2.0
+            group_center_y = (min_y + max_y) / 2.0
+
+            # page center in TechDraw coords: use template width/height /2
+            page_center_x = pw / 2.0
+            page_center_y = ph / 2.0
+
+            dx = page_center_x - group_center_x
+            dy = page_center_y - group_center_y
+
+            log(f"[CENTER] group cx={group_center_x:.2f} cy={group_center_y:.2f} -> page cx={page_center_x:.2f} cy={page_center_y:.2f} dx={dx:.2f} dy={dy:.2f}")
+
+            # apply shift to all views
+            for v in created:
+                try:
+                    vx = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
+                    vy = float(getattr(v, "Y", getattr(v.ViewObject, "Y", 0.0)))
+                    newx = vx + dx
+                    newy = vy + dy
+                    # prefer ViewObject assignment if available
+                    if hasattr(v, "ViewObject") and hasattr(v.ViewObject, "X"):
+                        v.ViewObject.X = float(newx)
+                        v.ViewObject.Y = float(newy)
+                    else:
+                        v.X = float(newx)
+                        v.Y = float(newy)
+                except Exception:
+                    try:
+                        set_view_position_via_viewobject(v, vx+dx, vy+dy)
+                    except Exception:
+                        pass
+
     try:
         single_doc.recompute()
     except Exception:
@@ -344,7 +370,7 @@ def create_single_overview_grid_from_19(main_doc, single_doc, template_name, sca
     except Exception:
         pass
 
-    log(">>> Gotowe: Single overview (grid from 19 offsets) utworzona.")
+    log(">>> Gotowe: Single overview (grupa wyśrodkowana) utworzona.")
 
 # ENTRYPOINT
 try:
@@ -372,7 +398,7 @@ try:
         log("Nie wybrano szablonu lub skali. Anuluję.")
         raise SystemExit
 
-    create_single_overview_grid_from_19(main_doc, single_doc, tpl, scale, single_data)
+    create_single_overview_grid_centered(main_doc, single_doc, tpl, scale, single_data)
 
     log("=== KONIEC CREATE_DRAWINGS_SINGLE ===")
 
