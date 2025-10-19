@@ -3,22 +3,19 @@ import a2p_importpart
 import TechDraw
 from PySide2 import QtWidgets
 
-# Macro: 20_CREATE_SINGLE_OVERVIEW.FCMacro (z poprawionymi odsunięciami)
-# Tworzy w dokumencie SINGLE_ASSEMBLY stronę TechDraw z widokami XZ
-# dla wszystkich elementów pojedynczych użytych w MAIN (po jednym XZ na każdy EP).
+# 20_CREATE_DRAWINGS_SINGLE.FCMacro
+# Siatka widoków XZ elementów pojedynczych; start w lewym-górnym narożniku;
+# offsety oparte na logice z 19_CREATE_DRAWINGS_MAIN;
+# po dodaniu widoku przypisuję pozycje przez ViewObject i wymuszam recompute.
 
-# --- Logger ---
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
 
-# --- Projekt ---
 def get_project_dir():
     if App.ActiveDocument and App.ActiveDocument.FileName:
         return os.path.dirname(App.ActiveDocument.FileName)
-    else:
-        raise Exception("Zapisz i otwórz dokument projektu zanim uruchomisz makro.")
+    raise Exception("Zapisz i otwórz dokument projektu zanim uruchomisz makro.")
 
-# --- Template chooser (jak w 19) ---
 def list_templates():
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     if not os.path.isdir(tpl_dir):
@@ -36,7 +33,7 @@ def select_template_and_scale():
     scale_layout = QtWidgets.QHBoxLayout()
     scale_label = QtWidgets.QLabel("Skala:")
     scale_combo = QtWidgets.QComboBox()
-    scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
+    scale_combo.addItems(["1:1", "1:5", "1:10", "1:20", "1:50", "1:100"])
     scale_layout.addWidget(scale_label)
     scale_layout.addWidget(scale_combo)
     layout.addLayout(scale_layout)
@@ -51,31 +48,27 @@ def select_template_and_scale():
     dlg.exec_()
     return tpl_combo.currentText(), scale_combo.currentText()
 
-# --- Helpers: bbox dims ---
 def _get_dims_from_bbox(obj):
     try:
         if not hasattr(obj, "Shape") or obj.Shape is None or obj.Shape.isNull():
-            return (0.0, 0.0, 0.0)
+            return (0.0,0.0,0.0)
         bb = obj.Shape.BoundBox
         dims = [bb.XLength, bb.YLength, bb.ZLength]
         dims.sort(reverse=True)
         return dims[0], dims[1], dims[2]
     except Exception:
-        return (0.0, 0.0, 0.0)
+        return (0.0,0.0,0.0)
 
-# --- Collect single data from MAIN doc and SINGLE files ---
 def collect_single_data_from_main(main_doc, single_dir, main_dir):
     re_ew     = re.compile(r"^(\d{3})_")
     re_single = re.compile(r"^(\d{4})_")
     single_data = {}
-
     for o in main_doc.Objects:
         m = re_single.match(o.Label or "")
         if not m: continue
         pref = m.group(1)
         sd = single_data.setdefault(pref, {"ilosc":0,"dlugosc":0.0,"szer":0.0,"wys":0.0,"nazwa":"?","ews": set()})
         sd["ilosc"] += 1
-
     for o in main_doc.Objects:
         m = re_ew.match(o.Label or "")
         if not m: continue
@@ -97,7 +90,6 @@ def collect_single_data_from_main(main_doc, single_dir, main_dir):
         finally:
             try: App.closeDocument(td.Name)
             except Exception: pass
-
     for pref, data in single_data.items():
         fcstd_path = os.path.join(single_dir, f"{pref}.FCStd")
         if not os.path.isfile(fcstd_path): continue
@@ -118,14 +110,11 @@ def collect_single_data_from_main(main_doc, single_dir, main_dir):
         finally:
             try: App.closeDocument(td.Name)
             except Exception: pass
-
     for k,v in single_data.items():
         if isinstance(v.get("ews"), set):
             v["ews"] = sorted(list(v["ews"]))
-
     return single_data
 
-# --- Create SINGLE_ASSEMBLY and import SINGLE files (like in 19) ---
 def create_single_assembly_and_open(docname, single_dir, draw_dir):
     doc = App.newDocument(docname)
     App.setActiveDocument(doc.Name)
@@ -135,14 +124,12 @@ def create_single_assembly_and_open(docname, single_dir, draw_dir):
         doc.saveAs(doc_path)
     except Exception:
         pass
-
     files = []
     if os.path.isdir(single_dir):
         files = [f for f in os.listdir(single_dir) if f.lower().endswith(".fcstd")]
     if not files:
         log(f"!!! Brak plików w katalogu: {single_dir}")
         return doc
-
     offset = 0
     for f in files:
         filepath = os.path.join(single_dir, f)
@@ -154,7 +141,6 @@ def create_single_assembly_and_open(docname, single_dir, draw_dir):
                 offset += 30000
         except Exception as e:
             log(f"!!! Błąd importu {f}: {e}")
-
     try:
         doc.recompute()
         doc.save()
@@ -163,133 +149,7 @@ def create_single_assembly_and_open(docname, single_dir, draw_dir):
     log(f">>> Utworzono {docname} z {len(files)} plików")
     return doc
 
-# --- Create overview page with XZ views laid out in grid using 19 logic ---
-def create_single_overview(main_doc, single_doc, template_name, scale_str, single_data):
-    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
-    tpl_path = os.path.join(tpl_dir, template_name)
-    if not os.path.isfile(tpl_path):
-        log(f"!!! Nie znaleziono szablonu: {tpl_path}")
-        return
-
-    try:
-        num, den = scale_str.split(":")
-        scale_val = float(num) / float(den)
-    except Exception:
-        scale_val = 1.0
-
-    template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
-    template_obj.Template = tpl_path
-    page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
-    page.Template = template_obj
-
-    # layout parameters based on 19_CREATE_DRAWINGS_MAIN
-    max_dim = 3000.0
-    margin  = 30.0
-    view_size = max_dim * scale_val
-    offset_x = view_size + margin
-    offset_y = view_size/2 + margin
-
-    # compute how many columns fit across the template width
-    try:
-        pw = float(template_obj.Width)
-    except Exception:
-        pw = 210.0  # fallback arbitrary
-    cols_fit = max(1, int((pw - 2*margin) // offset_x))
-    # if no columns fit, force 1
-    if cols_fit < 1:
-        cols_fit = 1
-
-    log(f"--- Tworzę widoki XZ dla {len(single_data)} elementów pojedynczych (cols_fit={cols_fit}) ---")
-
-    created = []
-    idx = 0
-    for pref in sorted(single_data.keys()):
-        # find source object in single_doc by label prefix or containing pref
-        src = None
-        for o in single_doc.Objects:
-            try:
-                if (o.Label or "").startswith(pref):
-                    src = o
-                    break
-            except Exception:
-                continue
-        if not src:
-            for o in single_doc.Objects:
-                try:
-                    if pref in (o.Label or ""):
-                        src = o
-                        break
-                except Exception:
-                    continue
-        if not src:
-            log(f"[WARN] Nie znaleziono obiektu SINGLE dla {pref} w SINGLE_ASSEMBLY; pomijam")
-            idx += 1
-            continue
-
-        # create view XZ
-        view = single_doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{pref}")
-        view.Source = [src]
-        view.Direction = (0,1,0)
-        view.ScaleType = "Custom"
-        view.Scale = scale_val
-
-        # grid position
-        col = idx % cols_fit
-        row = idx // cols_fit
-        # center group like in 19: place relative positions then shift later
-        view.X = col * offset_x
-        view.Y = - (row * offset_y)  # stack downward initially
-        page.addView(view)
-
-        # optional view tweaks
-        try:
-            vo = view.ViewObject
-            if hasattr(vo, "FontSize"):
-                vo.FontSize = 10
-        except Exception:
-            pass
-
-        created.append(view)
-        log(f">>> Dodano ViewXZ_{pref} w grid col={col} row={row} rawX={view.X} rawY={view.Y}")
-        idx += 1
-
-    # center the whole group on the page (similar to 19 logic)
-    try:
-        pw = float(template_obj.Width)
-        ph = float(template_obj.Height)
-        page_center_x = pw / 2
-        page_center_y = ph / 2
-
-        xs = [float(v.X) for v in created] if created else []
-        ys = [float(v.Y) for v in created] if created else []
-        if xs and ys:
-            min_x = min(xs)
-            max_x = max(xs)
-            min_y = min(ys)
-            max_y = max(ys)
-            center_group_x = (min_x + max_x) / 2.0
-            center_group_y = (min_y + max_y) / 2.0
-            dx = page_center_x - center_group_x
-            dy = page_center_y - center_group_y
-            for v in created:
-                try:
-                    v.X = float(v.X) + dx
-                    v.Y = float(v.Y) + dy
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    try:
-        single_doc.recompute()
-        single_doc.save()
-    except Exception:
-        pass
-
-    log(">>> Gotowe: Single overview page utworzona.")
-
-# --- Choose MAIN document: prefer active if it looks like MAIN ---
-def choose_main_document(proj_dir, draw_dir, main_dir):
+def choose_main_document(draw_dir, main_dir):
     ad = App.ActiveDocument
     re_ew = re.compile(r"^(\d{3})_")
     re_single = re.compile(r"^(\d{4})_")
@@ -306,11 +166,9 @@ def choose_main_document(proj_dir, draw_dir, main_dir):
         except Exception:
             return False
         return False
-
     if looks_like_main(ad):
         log(f"[INFO] Używam aktywnego dokumentu jako MAIN: {ad.Name}")
         return ad
-
     candidate = os.path.join(draw_dir, "MAIN_ASSEMBLY.FCStd")
     if os.path.isfile(candidate):
         try:
@@ -319,7 +177,6 @@ def choose_main_document(proj_dir, draw_dir, main_dir):
             return md
         except Exception:
             pass
-
     candidate2 = os.path.join(main_dir, "MAIN_ASSEMBLY.FCStd")
     if os.path.isfile(candidate2):
         try:
@@ -328,7 +185,6 @@ def choose_main_document(proj_dir, draw_dir, main_dir):
             return md
         except Exception:
             pass
-
     if os.path.isdir(main_dir):
         for fname in os.listdir(main_dir):
             if fname.lower().endswith(".fcstd"):
@@ -339,10 +195,158 @@ def choose_main_document(proj_dir, draw_dir, main_dir):
                     return md
                 except Exception:
                     continue
-
     return None
 
-# --- ENTRYPOINT ---
+def set_view_position_via_viewobject(view, x, y):
+    try:
+        vo = view.ViewObject
+        # Assign floats to ViewObject.X/Y if present
+        if hasattr(vo, "X") and hasattr(vo, "Y"):
+            vo.X = float(x)
+            vo.Y = float(y)
+            # some ViewObjects need update/redraw
+            try:
+                vo.update()
+            except Exception:
+                pass
+            return True
+    except Exception:
+        pass
+    # fallback to assigning to view.X/view.Y (converted to float)
+    try:
+        view.X = float(x)
+        view.Y = float(y)
+        return True
+    except Exception:
+        try:
+            view.X = x
+            view.Y = y
+            return True
+        except Exception:
+            return False
+
+def create_single_overview_grid_from_19(main_doc, single_doc, template_name, scale_str, single_data):
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    tpl_path = os.path.join(tpl_dir, template_name)
+    if not os.path.isfile(tpl_path):
+        log(f"!!! Nie znaleziono szablonu: {tpl_path}")
+        return
+    try:
+        num, den = scale_str.split(":"); scale_val = float(num) / float(den)
+    except Exception:
+        scale_val = 1.0
+    template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
+    template_obj.Template = tpl_path
+    page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
+    page.Template = template_obj
+
+    # offset logic from 19
+    max_dim = 3000.0
+    margin  = 30.0
+    view_size = max_dim * scale_val
+    offset_x = view_size + margin
+    offset_y = view_size/2 + margin
+
+    # template dims
+    try:
+        pw = float(template_obj.Width); ph = float(template_obj.Height)
+    except Exception:
+        pw = 210.0; ph = 297.0
+
+    left_margin = margin
+    top_margin = margin
+    usable_w = pw - 2*left_margin
+    cols_fit = max(1, int(usable_w // offset_x))
+    if cols_fit < 1: cols_fit = 1
+
+    log(f"[GRID19] pw={pw} ph={ph} scale={scale_val} view_size={view_size} offset_x={offset_x} offset_y={offset_y} cols={cols_fit}")
+
+    created = []
+    idx = 0
+    for pref in sorted(single_data.keys()):
+        # find object in single_doc by prefix or containing pref
+        src = None
+        for o in single_doc.Objects:
+            try:
+                if (o.Label or "").startswith(pref):
+                    src = o; break
+            except Exception:
+                continue
+        if not src:
+            for o in single_doc.Objects:
+                try:
+                    if pref in (o.Label or ""):
+                        src = o; break
+                except Exception:
+                    continue
+        if not src:
+            log(f"[WARN] Nie znaleziono obiektu SINGLE dla {pref} w SINGLE_ASSEMBLY; pomijam")
+            idx += 1
+            continue
+
+        col = idx % cols_fit
+        row = idx // cols_fit
+
+        center_x_in_cell = view_size / 2.0
+        center_y_in_cell = view_size / 2.0
+
+        raw_x = left_margin + col * offset_x + center_x_in_cell
+        raw_y = ph - (top_margin + row * offset_y + center_y_in_cell)
+
+        view = single_doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{pref}")
+        view.Source = [src]
+        view.Direction = (0,1,0)
+        view.ScaleType = "Custom"
+        view.Scale = scale_val
+
+        # add view to page first, then set ViewObject positions and recompute view/page
+        page.addView(view)
+
+        success = set_view_position_via_viewobject(view, raw_x, raw_y)
+        if not success:
+            log(f"[WARN] Nie udało się ustawić pozycji ViewXZ_{pref} na X={raw_x} Y={raw_y}")
+
+        # force redraw of view and page
+        try:
+            view.recompute()
+        except Exception:
+            pass
+        try:
+            page.recompute()
+        except Exception:
+            pass
+
+        try:
+            vo = view.ViewObject
+            if hasattr(vo, "FontSize"): vo.FontSize = 10
+            if hasattr(vo, "RowHeight"): vo.RowHeight = 6
+            vo.Visibility = True
+        except Exception:
+            pass
+
+        created.append(view)
+        # log values as floats (safe)
+        try:
+            vx = float(raw_x); vy = float(raw_y)
+            log(f">>> Dodano ViewXZ_{pref} col={col} row={row} X={vx:.2f} Y={vy:.2f}")
+        except Exception:
+            log(f">>> Dodano ViewXZ_{pref} col={col} row={row} (positions set)")
+
+        idx += 1
+
+    # final recompute & save
+    try:
+        single_doc.recompute()
+    except Exception:
+        pass
+    try:
+        single_doc.save()
+    except Exception:
+        pass
+
+    log(">>> Gotowe: Single overview (grid from 19 offsets) utworzona.")
+
+# ENTRYPOINT
 try:
     proj_dir = get_project_dir()
     single_dir = os.path.join(proj_dir, "SINGLE")
@@ -350,15 +354,15 @@ try:
     draw_dir   = os.path.join(proj_dir, "DRAWINGS")
     os.makedirs(draw_dir, exist_ok=True)
 
-    log("=== START CREATE_SINGLE_OVERVIEW ===")
+    log("=== START CREATE_DRAWINGS_SINGLE ===")
 
-    main_doc = choose_main_document(proj_dir, draw_dir, main_dir)
+    main_doc = choose_main_document(draw_dir, main_dir)
     if not main_doc:
         raise Exception("Nie udało się odnaleźć lub otworzyć dokumentu MAIN. Upewnij się, że aktywny dokument to MAIN lub że istnieje MAIN_ASSEMBLY.FCStd lub inne .FCStd w katalogu MAIN.")
 
     single_data = collect_single_data_from_main(main_doc, single_dir, main_dir)
     if not single_data:
-        log("Brak wykrytych elementów pojedynczych w MAIN_ASSEMBLY. Kończę.")
+        log("Brak wykrytych elementów pojedynczych w MAIN. Kończę.")
         raise SystemExit
 
     single_doc = create_single_assembly_and_open("SINGLE_ASSEMBLY", single_dir, draw_dir)
@@ -368,9 +372,9 @@ try:
         log("Nie wybrano szablonu lub skali. Anuluję.")
         raise SystemExit
 
-    create_single_overview(main_doc, single_doc, tpl, scale, single_data)
+    create_single_overview_grid_from_19(main_doc, single_doc, tpl, scale, single_data)
 
-    log("=== KONIEC CREATE_SINGLE_OVERVIEW ===")
+    log("=== KONIEC CREATE_DRAWINGS_SINGLE ===")
 
 except Exception as e:
     log(f"!!! FAIL: {e}")
