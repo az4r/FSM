@@ -1,7 +1,7 @@
 import FreeCAD as App, os, re, json
 import a2p_importpart
 import TechDraw
-from PySide2 import QtWidgets
+from PySide2 import QtWidgets, QtGui
 
 # --- Logger ---
 def log(msg):
@@ -174,7 +174,72 @@ def export_single_data_to_file(single_data, tmp_file):
     except Exception as e:
         log(f"[DEBUG] Nie udało się zapisać tmp: {e}")
 
-# --- Import do arkusza BOM per EW (z wyczyszczeniem obszaru) ---
+# --- Dialogi PySide2: materiał i gęstość (z opcją apply to all) ---
+apply_to_all_mat = False
+global_material = "S355J2"
+apply_to_all_dens = False
+global_density = 7850.0  # kg/m³
+
+def ask_material(default="S355J2"):
+    global apply_to_all_mat, global_material
+    if apply_to_all_mat:
+        return global_material
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Gatunek stali")
+    layout = QtWidgets.QVBoxLayout(dlg)
+    form = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gatunek stali:")
+    edit = QtWidgets.QLineEdit()
+    edit.setText(default)
+    form.addWidget(label)
+    form.addWidget(edit)
+    layout.addLayout(form)
+    checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
+    layout.addWidget(checkbox)
+    btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+    layout.addWidget(btn)
+    btn.accepted.connect(dlg.accept)
+    if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        mat = edit.text().strip() or default
+        if checkbox.isChecked():
+            apply_to_all_mat = True
+            global_material = mat
+        return mat
+    return default
+
+def ask_density(default=7850.0):
+    global apply_to_all_dens, global_density
+    if apply_to_all_dens:
+        return global_density
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Gęstość stali")
+    layout = QtWidgets.QVBoxLayout(dlg)
+    form = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gęstość stali:")
+    edit = QtWidgets.QLineEdit()
+    edit.setText(str(default))
+    unit = QtWidgets.QLabel("kg/m³")
+    form.addWidget(label)
+    form.addWidget(edit)
+    form.addWidget(unit)
+    layout.addLayout(form)
+    checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
+    layout.addWidget(checkbox)
+    btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+    layout.addWidget(btn)
+    btn.accepted.connect(dlg.accept)
+    if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        try:
+            dens = float(edit.text().strip())
+        except Exception:
+            dens = default
+        if checkbox.isChecked():
+            apply_to_all_dens = True
+            global_density = dens
+        return dens
+    return default
+
+# --- Import do arkusza BOM per EW (rozszerzone kolumny + czyszczenie) ---
 def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, single_dir=None):
     if not tmp_file or not os.path.isfile(tmp_file):
         log(f"[DEBUG] brak tmp_file: {tmp_file}")
@@ -201,6 +266,7 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
 
     log(f"[DEBUG] EW {ew_label} prefix={ew_prefix} -> total EP keys={len(single_data)}; matched={len(filtered)}; matched_list={sorted(filtered)}")
 
+    # fallback: jeśli pusto, spróbuj odczytać listę EP z MAIN/<ew_prefix>.FCStd
     if not filtered and main_dir:
         main_fcstd = os.path.join(main_dir, f"{ew_prefix}.FCStd")
         if os.path.isfile(main_fcstd):
@@ -230,10 +296,10 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
     sheet_name = f"BOM_{ew_label}"
     if sheet_name in doc.Objects:
         sheet = doc.getObject(sheet_name)
-        # deterministyczne wyczyszczenie obszaru A1..F{max_rows}
+        # deterministyczne wyczyszczenie obszaru A1..I{max_rows}
         try:
             max_rows = 500
-            cols = ['A','B','C','D','E','F']
+            cols = ['A','B','C','D','E','F','G','H','I']
             for r in range(1, max_rows+1):
                 for c in cols:
                     try:
@@ -248,6 +314,7 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
     else:
         sheet = doc.addObject("Spreadsheet::Sheet", sheet_name)
 
+    # nagłówki (A..I)
     try:
         sheet.set("A1", f"LISTA ELEMENTÓW POJEDYNCZYCH DLA EW {ew_prefix}")
         sheet.set("A2","Nr")
@@ -256,12 +323,23 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
         sheet.set("D2","Długość [mm]")
         sheet.set("E2","Szerokość [mm]")
         sheet.set("F2","Wysokość [mm]")
+        sheet.set("G2","Gatunek stali")
+        sheet.set("H2","Waga elementu [kg]")
+        sheet.set("I2","Waga łącznie [kg]")
     except Exception as e:
         log(f"[DEBUG] Błąd przy wpisywaniu nagłówków do {sheet_name}: {e}")
 
+    # wypełnianie danych z dialogami PySide2 (można zaznaczyć 'apply to all' by uniknąć powtarzania)
     row = 3
+    total_weight = 0.0
     for pref in sorted(filtered):
         data = single_data.get(pref, {})
+        material = ask_material("S355J2")
+        density = ask_density(7850.0)
+        vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
+        waga_elem = vol_m3 * density
+        waga_total = waga_elem * data.get("ilosc",0)
+
         try:
             sheet.set(f"A{row}", pref)
             sheet.set(f"B{row}", data.get("nazwa","?"))
@@ -269,16 +347,28 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
             sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
             sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
             sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
+            sheet.set(f"G{row}", material)
+            sheet.set(f"H{row}", f"{waga_elem:.3f}")
+            sheet.set(f"I{row}", f"{waga_total:.3f}")
         except Exception as e:
             log(f"[DEBUG] Błąd przy wstawianiu wiersza {row} do {sheet_name}: {e}")
+
+        total_weight += waga_total
         row += 1
+
+    # Podsumowanie wagi pod tabelą
+    try:
+        sheet.set(f"H{row}", "Całkowita waga konstrukcji")
+        sheet.set(f"I{row}", f"{total_weight:.3f}")
+    except Exception:
+        pass
 
     try:
         doc.recompute()
     except Exception:
         pass
 
-    log(f"[DEBUG] Utworzono sheet {sheet_name} z {len(filtered)} wpisami (zakres A1:F{row-1})")
+    log(f"[DEBUG] Utworzono sheet {sheet_name} z {len(filtered)} wpisami (zakres A1:I{row-1})")
     return sheet
 
 # --- Pomocnik: policz zapełnione wiersze i kolumny w arkuszu ---
@@ -398,7 +488,8 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                         pass
 
                     cell_start = "A1"
-                    cell_end = f"F{last_row}"
+                    # include up to column I because we added columns to sheet
+                    cell_end = f"I{last_row}"
 
                     try:
                         doc.recompute()
