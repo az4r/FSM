@@ -174,19 +174,25 @@ def export_single_data_to_file(single_data, tmp_file):
     except Exception as e:
         log(f"[DEBUG] Nie udało się zapisać tmp: {e}")
 
-# --- Dialogi PySide2: materiał i gęstość (z opcją apply to all) ---
+# --- Dialogi PySide2: materiał i gęstość (z etykietą Element: [Nr]) ---
 apply_to_all_mat = False
 global_material = "S355J2"
 apply_to_all_dens = False
 global_density = 7850.0  # kg/m³
 
-def ask_material(default="S355J2"):
+def ask_material(element_label, default="S355J2"):
     global apply_to_all_mat, global_material
     if apply_to_all_mat:
         return global_material
     dlg = QtWidgets.QDialog()
     dlg.setWindowTitle("Gatunek stali")
     layout = QtWidgets.QVBoxLayout(dlg)
+
+    # Element label
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+
     form = QtWidgets.QHBoxLayout()
     label = QtWidgets.QLabel("Gatunek stali:")
     edit = QtWidgets.QLineEdit()
@@ -194,11 +200,14 @@ def ask_material(default="S355J2"):
     form.addWidget(label)
     form.addWidget(edit)
     layout.addLayout(form)
+
     checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
+
     btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
     layout.addWidget(btn)
     btn.accepted.connect(dlg.accept)
+
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
         mat = edit.text().strip() or default
         if checkbox.isChecked():
@@ -207,13 +216,19 @@ def ask_material(default="S355J2"):
         return mat
     return default
 
-def ask_density(default=7850.0):
+def ask_density(element_label, default=7850.0):
     global apply_to_all_dens, global_density
     if apply_to_all_dens:
         return global_density
     dlg = QtWidgets.QDialog()
     dlg.setWindowTitle("Gęstość stali")
     layout = QtWidgets.QVBoxLayout(dlg)
+
+    # Element label
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+
     form = QtWidgets.QHBoxLayout()
     label = QtWidgets.QLabel("Gęstość stali:")
     edit = QtWidgets.QLineEdit()
@@ -223,11 +238,14 @@ def ask_density(default=7850.0):
     form.addWidget(edit)
     form.addWidget(unit)
     layout.addLayout(form)
+
     checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
+
     btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
     layout.addWidget(btn)
     btn.accepted.connect(dlg.accept)
+
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
         try:
             dens = float(edit.text().strip())
@@ -329,13 +347,14 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
     except Exception as e:
         log(f"[DEBUG] Błąd przy wpisywaniu nagłówków do {sheet_name}: {e}")
 
-    # wypełnianie danych z dialogami PySide2 (można zaznaczyć 'apply to all' by uniknąć powtarzania)
+    # wypełnianie danych z dialogami PySide2 (Element label jest przekazywany do dialogów)
     row = 3
     total_weight = 0.0
     for pref in sorted(filtered):
         data = single_data.get(pref, {})
-        material = ask_material("S355J2")
-        density = ask_density(7850.0)
+        element_label = pref
+        material = ask_material(element_label, "S355J2")
+        density = ask_density(element_label, 7850.0)
         vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
         waga_elem = vol_m3 * density
         waga_total = waga_elem * data.get("ilosc",0)
@@ -488,7 +507,6 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                         pass
 
                     cell_start = "A1"
-                    # include up to column I because we added columns to sheet
                     cell_end = f"I{last_row}"
 
                     try:
