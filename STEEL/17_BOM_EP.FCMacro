@@ -1,6 +1,6 @@
 import FreeCAD as App
 import os, re
-from PySide import QtGui
+from PySide2 import QtWidgets
 
 doc = App.ActiveDocument
 if not doc or not doc.FileName:
@@ -39,7 +39,10 @@ def get_profile_name(single_fcstd):
                 return o.Label or "?"
         return "?"
     finally:
-        App.closeDocument(td.Name)
+        try:
+            App.closeDocument(td.Name)
+        except Exception:
+            pass
 
 def get_dims_from_bbox(obj):
     if not hasattr(obj,"Shape") or not obj.Shape or obj.Shape.isNull():
@@ -49,7 +52,7 @@ def get_dims_from_bbox(obj):
     dims.sort(reverse=True)
     return dims[0], dims[1], dims[2]
 
-# --- Okienka ---
+# --- Dialogi PySide2 z informacją o aktualnym elemencie ---
 
 apply_to_all_mat = False
 global_material = "S355J2"
@@ -57,26 +60,35 @@ global_material = "S355J2"
 apply_to_all_dens = False
 global_density = 7850.0  # kg/m³
 
-def ask_material(default="S355J2"):
+def ask_material(element_label, default="S355J2"):
     global apply_to_all_mat, global_material
     if apply_to_all_mat:
         return global_material
-    dialog = QtGui.QDialog()
-    dialog.setWindowTitle("Gatunek stali")
-    layout = QtGui.QVBoxLayout(dialog)
-    form_layout = QtGui.QHBoxLayout()
-    label = QtGui.QLabel("Gatunek stali:")
-    textbox = QtGui.QLineEdit()
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Gatunek stali")
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+
+    form_layout = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gatunek stali:")
+    textbox = QtWidgets.QLineEdit()
     textbox.setText(default)
     form_layout.addWidget(label)
     form_layout.addWidget(textbox)
     layout.addLayout(form_layout)
-    checkbox = QtGui.QCheckBox("Zastosuj do wszystkich pozycji")
+
+    checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
-    button_box = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok)
-    layout.addWidget(button_box)
-    button_box.accepted.connect(dialog.accept)
-    if dialog.exec_() == QtGui.QDialog.Accepted:
+
+    btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    layout.addWidget(btns)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+
+    if dlg.exec_() == QtWidgets.QDialog.Accepted:
         mat = textbox.text().strip() or default
         if checkbox.isChecked():
             apply_to_all_mat = True
@@ -84,31 +96,40 @@ def ask_material(default="S355J2"):
         return mat
     return default
 
-def ask_density(default=7850.0):
+def ask_density(element_label, default=7850.0):
     global apply_to_all_dens, global_density
     if apply_to_all_dens:
         return global_density
-    dialog = QtGui.QDialog()
-    dialog.setWindowTitle("Gęstość stali")
-    layout = QtGui.QVBoxLayout(dialog)
-    form_layout = QtGui.QHBoxLayout()
-    label = QtGui.QLabel("Gęstość stali:")
-    textbox = QtGui.QLineEdit()
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Gęstość stali")
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
+    lbl_elem.setStyleSheet("font-weight: bold;")
+    layout.addWidget(lbl_elem)
+
+    form_layout = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel("Gęstość stali:")
+    textbox = QtWidgets.QLineEdit()
     textbox.setText(str(default))
-    unit = QtGui.QLabel("kg/m³")
+    unit = QtWidgets.QLabel("kg/m³")
     form_layout.addWidget(label)
     form_layout.addWidget(textbox)
     form_layout.addWidget(unit)
     layout.addLayout(form_layout)
-    checkbox = QtGui.QCheckBox("Zastosuj do wszystkich pozycji")
+
+    checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
-    button_box = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok)
-    layout.addWidget(button_box)
-    button_box.accepted.connect(dialog.accept)
-    if dialog.exec_() == QtGui.QDialog.Accepted:
+
+    btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    layout.addWidget(btns)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+
+    if dlg.exec_() == QtWidgets.QDialog.Accepted:
         try:
             dens = float(textbox.text().strip())
-        except:
+        except Exception:
             dens = default
         if checkbox.isChecked():
             apply_to_all_dens = True
@@ -151,7 +172,10 @@ for o in doc.Objects:
             sd = single_data.setdefault(pref_single, {"ilosc":0, "dlugosc":0.0, "szer":0.0, "wys":0.0, "nazwa":"?"})
             sd["ilosc"] += 1
     finally:
-        App.closeDocument(td.Name)
+        try:
+            App.closeDocument(td.Name)
+        except Exception:
+            pass
 
 # 3) Uzupełnienie danych z plików SINGLE
 for pref, data in single_data.items():
@@ -183,12 +207,19 @@ for pref, data in single_data.items():
                         if o.Label and o.Label.lower() != "line":
                             data["nazwa"] = o.Label
     finally:
-        App.closeDocument(td.Name)
+        try:
+            App.closeDocument(td.Name)
+        except Exception:
+            pass
 
 # --- Arkusz ---
+
 if "BOM_EP" in doc.Objects:
     sheet = doc.getObject("BOM_EP")
-    sheet.clearAll()
+    try:
+        sheet.clearAll()
+    except Exception:
+        pass
 else:
     sheet = doc.addObject("Spreadsheet::Sheet","BOM_EP")
 
@@ -207,8 +238,9 @@ row = 3
 total_weight = 0.0
 
 for pref, data in sorted(single_data.items()):
-    material = ask_material("S355J2")
-    density = ask_density(7850.0)
+    # przekazujemy label elementu do dialogów
+    material = ask_material(pref)
+    density = ask_density(pref)
     vol_m3 = (data["dlugosc"] * data["szer"] * data["wys"]) / 1e9
     waga_elem = vol_m3 * density
     waga_total = waga_elem * data["ilosc"]
@@ -230,5 +262,9 @@ for pref, data in sorted(single_data.items()):
 sheet.set(f"H{row}", "Całkowita waga konstrukcji")
 sheet.set(f"I{row}", f"{total_weight:.3f}")
 
-doc.recompute()
+try:
+    doc.recompute()
+except Exception:
+    pass
+
 App.Console.PrintMessage("Arkusz BOM_EP utworzony z nagłówkiem i podsumowaniem.\n")
