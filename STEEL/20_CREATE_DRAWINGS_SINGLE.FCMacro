@@ -3,9 +3,11 @@ import a2p_importpart
 import TechDraw
 from PySide2 import QtWidgets
 
-# 20_CREATE_DRAWINGS_SINGLE_WITH_TABLE.FCMacro
-# Tworzy siatkę widoków XZ, centruje grupę względem środka strony
-# i dodaje tabelę BOM (Spreadsheet + DrawViewSpreadsheet) zawierającą tylko elementy na tym rysunku.
+# 20_CREATE_DRAWINGS_SINGLE.FCMacro
+# Siatka widoków XZ (grupa wyśrodkowana) + tabela BOM umieszczona jak w 19_CREATE_DRAWINGS_MAIN:
+# center_x = margin_base + safe_offset + table_w_mm/2
+# center_y = margin_base + safe_offset + table_h_mm/2
+# (logika kopiowana z 19, przypisanie pozycji próbujemy zapisać na ViewObject jeśli dostępne)
 
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
@@ -47,11 +49,11 @@ def select_template_and_scale():
     dlg.exec_()
     return tpl_combo.currentText(), scale_combo.currentText()
 
-# --- Dialogi (kopie z 17_BOM_EP) ---
+# --- material/density dialogs ---
 apply_to_all_mat = False
 global_material = "S355J2"
 apply_to_all_dens = False
-global_density = 7850.0  # kg/m³
+global_density = 7850.0
 
 def ask_material(element_label, default="S355J2"):
     global apply_to_all_mat, global_material
@@ -460,7 +462,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         total_weight = 0.0
         for pref in sorted(created_prefs):
             data = single_data.get(pref, {})
-            # ask material / density with dialogs (user can apply to all)
             material = ask_material(pref)
             density = ask_density(pref)
             vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
@@ -517,9 +518,8 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
-        # estimate table size and position similarly to 19
+        # estimate table size and place in left-bottom corner using exact logic from 19_CREATE_DRAWINGS_MAIN
         try:
-            # determine filled size
             def sheet_filled_size_local(sheet):
                 max_col = 0
                 max_row = 0
@@ -551,8 +551,12 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             table_w_mm = filled_cols * col_width_mm
             margin_base = 30.0
             safe_offset = 2.0
-            center_x = margin_base + safe_offset + (table_w_mm / 2.0)
-            center_y = margin_base + safe_offset + (table_h_mm / 2.0)
+
+            # LEFT-BOTTOM placement (copied from 19)
+            left_margin = margin_base
+            bottom_margin = margin_base
+            center_x = left_margin + safe_offset + (table_w_mm / 2.0)
+            center_y = bottom_margin + safe_offset + (table_h_mm / 2.0)
 
             # assign X/Y to table view
             try:
@@ -575,7 +579,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 table_view.Width = table_w_mm
                 table_view.Height = table_h_mm
             except Exception:
-                # fallback default size
                 try:
                     table_view.Width = 160.0
                     table_view.Height = 90.0
