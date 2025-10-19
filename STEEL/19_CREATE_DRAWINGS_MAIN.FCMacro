@@ -1,7 +1,7 @@
 import FreeCAD as App, os, re, json
 import a2p_importpart
 import TechDraw
-from PySide2 import QtWidgets, QtGui
+from PySide2 import QtWidgets
 
 # --- Logger ---
 def log(msg):
@@ -506,8 +506,9 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                     except Exception:
                         pass
 
+                    # cell_end teraz obejmuje także wiersz z podsumowaniem (last_row + 1)
                     cell_start = "A1"
-                    cell_end = f"I{last_row}"
+                    cell_end = f"I{last_row + 1}"
 
                     try:
                         doc.recompute()
@@ -556,6 +557,9 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
 
                     # Oblicz rozmiar wyświetlanej tabeli na podstawie zapełnionych komórek
                     filled_rows, filled_cols = sheet_filled_size(sheet)
+                    # uwzględnij dodatkowy wiersz z podsumowaniem jeśli istnieje
+                    if filled_rows < last_row + 1:
+                        filled_rows = last_row + 1
                     row_height_mm = 6.0
                     col_width_mm = 25.0
                     table_h_mm = filled_rows * row_height_mm
