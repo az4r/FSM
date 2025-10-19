@@ -52,7 +52,7 @@ def get_dims_from_bbox(obj):
     dims.sort(reverse=True)
     return dims[0], dims[1], dims[2]
 
-# --- Dialogi PySide2 z informacją o aktualnym elemencie ---
+# --- Dialogi PySide2 z informacją o aktualnym elemencie (tylko OK) ---
 
 apply_to_all_mat = False
 global_material = "S355J2"
@@ -83,10 +83,9 @@ def ask_material(element_label, default="S355J2"):
     checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
 
-    btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-    layout.addWidget(btns)
-    btns.accepted.connect(dlg.accept)
-    btns.rejected.connect(dlg.reject)
+    button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+    layout.addWidget(button_box)
+    button_box.accepted.connect(dlg.accept)
 
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
         mat = textbox.text().strip() or default
@@ -121,10 +120,9 @@ def ask_density(element_label, default=7850.0):
     checkbox = QtWidgets.QCheckBox("Zastosuj do wszystkich pozycji")
     layout.addWidget(checkbox)
 
-    btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-    layout.addWidget(btns)
-    btns.accepted.connect(dlg.accept)
-    btns.rejected.connect(dlg.reject)
+    button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+    layout.addWidget(button_box)
+    button_box.accepted.connect(dlg.accept)
 
     if dlg.exec_() == QtWidgets.QDialog.Accepted:
         try:
@@ -238,7 +236,7 @@ row = 3
 total_weight = 0.0
 
 for pref, data in sorted(single_data.items()):
-    # przekazujemy label elementu do dialogów
+    # przekazujemy label elementu do dialogów (tylko OK)
     material = ask_material(pref)
     density = ask_density(pref)
     vol_m3 = (data["dlugosc"] * data["szer"] * data["wys"]) / 1e9
