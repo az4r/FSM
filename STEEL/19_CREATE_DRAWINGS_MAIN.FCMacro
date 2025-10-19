@@ -188,7 +188,6 @@ def ask_material(element_label, default="S355J2"):
     dlg.setWindowTitle("Gatunek stali")
     layout = QtWidgets.QVBoxLayout(dlg)
 
-    # Element label
     lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
     lbl_elem.setStyleSheet("font-weight: bold;")
     layout.addWidget(lbl_elem)
@@ -224,7 +223,6 @@ def ask_density(element_label, default=7850.0):
     dlg.setWindowTitle("Gęstość stali")
     layout = QtWidgets.QVBoxLayout(dlg)
 
-    # Element label
     lbl_elem = QtWidgets.QLabel(f"Element: {element_label}")
     lbl_elem.setStyleSheet("font-weight: bold;")
     layout.addWidget(lbl_elem)
@@ -257,7 +255,7 @@ def ask_density(element_label, default=7850.0):
         return dens
     return default
 
-# --- Import do arkusza BOM per EW (rozszerzone kolumny + czyszczenie) ---
+# --- Import do arkusza BOM per EW (rozszerzone kolumny + czyszczenie + merge A1:I1) ---
 def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, single_dir=None):
     if not tmp_file or not os.path.isfile(tmp_file):
         log(f"[DEBUG] brak tmp_file: {tmp_file}")
@@ -344,6 +342,24 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
         sheet.set("G2","Gatunek stali")
         sheet.set("H2","Waga elementu [kg]")
         sheet.set("I2","Waga łącznie [kg]")
+
+        # spróbuj zmergować A1:I1 - kilka wariantów API, każda próba w try/except
+        try:
+            # preferowana metoda jeśli dostępna
+            sheet.mergeCells("A1:I1")
+        except Exception:
+            try:
+                # alternatywna metoda spotykana w niektórych wersjach
+                if hasattr(sheet, "mergeRange"):
+                    sheet.mergeRange("A1","I1")
+            except Exception:
+                try:
+                    # pewna implementacja używa setMergedCells jako listy
+                    if hasattr(sheet, "setMergedCells"):
+                        sheet.setMergedCells(["A1:I1"])
+                except Exception:
+                    pass
+
     except Exception as e:
         log(f"[DEBUG] Błąd przy wpisywaniu nagłówków do {sheet_name}: {e}")
 
@@ -377,7 +393,7 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
 
     # Podsumowanie wagi pod tabelą
     try:
-        sheet.set(f"H{row}", "Całkowita waga konstrukcji")
+        sheet.set(f"H{row}", "Całkowita waga [kg]")
         sheet.set(f"I{row}", f"{total_weight:.3f}")
     except Exception:
         pass
@@ -506,7 +522,7 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                     except Exception:
                         pass
 
-                    # cell_end teraz obejmuje także wiersz z podsumowaniem (last_row + 1)
+                    # include summary row (last_row + 1)
                     cell_start = "A1"
                     cell_end = f"I{last_row + 1}"
 
@@ -557,7 +573,7 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
 
                     # Oblicz rozmiar wyświetlanej tabeli na podstawie zapełnionych komórek
                     filled_rows, filled_cols = sheet_filled_size(sheet)
-                    # uwzględnij dodatkowy wiersz z podsumowaniem jeśli istnieje
+                    # ensure we include summary row
                     if filled_rows < last_row + 1:
                         filled_rows = last_row + 1
                     row_height_mm = 6.0
