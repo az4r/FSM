@@ -251,7 +251,7 @@ for pref, data in sorted(ew_data.items()):
     row += 1
 
 # Podsumowanie pod tabelą
-sheet.set(f"H{row}", "Całkowita waga konstrukcji")
+sheet.set(f"H{row}", "Całkowita waga [kg]")
 sheet.set(f"I{row}", f"{total_weight:.3f}")
 
 try:
