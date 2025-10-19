@@ -1,0 +1,537 @@
+import FreeCAD as App, os, re, json
+import a2p_importpart
+import TechDraw
+from PySide2 import QtWidgets
+
+# --- Logger ---
+def log(msg):
+    App.Console.PrintMessage(str(msg) + "\n")
+
+# --- Projekt ---
+def get_project_dir():
+    if App.ActiveDocument and App.ActiveDocument.FileName:
+        return os.path.dirname(App.ActiveDocument.FileName)
+    else:
+        raise Exception("Brak aktywnego dokumentu z zapisaną ścieżką")
+
+# --- Template chooser ---
+def list_templates():
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    if not os.path.isdir(tpl_dir):
+        log(f"!!! Nie znaleziono katalogu Templates: {tpl_dir}")
+        return []
+    return [f for f in os.listdir(tpl_dir) if f.lower().endswith(".svg")]
+
+def select_template_and_scale():
+    files = list_templates()
+    if not files:
+        return None, None
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Ustawienia rysunku TechDraw")
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    scale_layout = QtWidgets.QHBoxLayout()
+    scale_label = QtWidgets.QLabel("Skala:")
+    scale_combo = QtWidgets.QComboBox()
+    scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
+    scale_layout.addWidget(scale_label)
+    scale_layout.addWidget(scale_combo)
+    layout.addLayout(scale_layout)
+
+    tpl_label = QtWidgets.QLabel("Szablon:")
+    tpl_combo = QtWidgets.QComboBox()
+    tpl_combo.addItems(files)
+    layout.addWidget(tpl_label)
+    layout.addWidget(tpl_combo)
+
+    btn_ok = QtWidgets.QPushButton("OK")
+    layout.addWidget(btn_ok)
+    btn_ok.clicked.connect(dlg.accept)
+
+    dlg.exec_()
+    return tpl_combo.currentText(), scale_combo.currentText()
+
+# --- Tworzenie złożeń ---
+def create_assembly(docname, src_dir, draw_dir):
+    doc = App.newDocument(docname)
+    App.setActiveDocument(doc.Name)
+    App.ActiveDocument = doc
+    doc_path = os.path.join(draw_dir, f"{docname}.FCStd")
+    try:
+        doc.saveAs(doc_path)
+    except Exception:
+        pass
+
+    files = []
+    if os.path.isdir(src_dir):
+        files = [f for f in os.listdir(src_dir) if f.lower().endswith(".fcstd")]
+    if not files:
+        log(f"!!! Brak plików w katalogu: {src_dir}")
+        return doc
+
+    offset = 0
+    for f in files:
+        filepath = os.path.join(src_dir, f)
+        try:
+            root = a2p_importpart.importPartFromFile(doc, filepath)
+            if root:
+                root.Placement.Base.x = offset
+                log(f">>> Zaimportowano {f} na X={offset}")
+                offset += 30000
+        except Exception as e:
+            log(f"!!! Błąd importu {f}: {e}")
+
+    try:
+        doc.recompute()
+        doc.save()
+    except Exception:
+        pass
+    log(f">>> Utworzono {docname} z {len(files)} plików")
+    return doc
+
+# --- Zbieranie danych EP ---
+def _get_dims_from_bbox(obj):
+    try:
+        if not hasattr(obj, "Shape") or obj.Shape is None or obj.Shape.isNull():
+            return (0.0, 0.0, 0.0)
+        bb = obj.Shape.BoundBox
+        dims = [bb.XLength, bb.YLength, bb.ZLength]
+        dims.sort(reverse=True)
+        return dims[0], dims[1], dims[2]
+    except Exception:
+        return (0.0, 0.0, 0.0)
+
+def collect_single_data(main_doc, single_dir, main_dir):
+    re_ew     = re.compile(r"^(\d{3})_")
+    re_single = re.compile(r"^(\d{4})_")
+    single_data = {}
+
+    for o in main_doc.Objects:
+        m = re_single.match(o.Label or "")
+        if not m: continue
+        pref = m.group(1)
+        sd = single_data.setdefault(pref, {"ilosc":0,"dlugosc":0.0,"szer":0.0,"wys":0.0,"nazwa":"?","ews": set()})
+        sd["ilosc"] += 1
+
+    for o in main_doc.Objects:
+        m = re_ew.match(o.Label or "")
+        if not m: continue
+        pref_ew = m.group(1)
+        fcstd_path = os.path.join(main_dir, f"{pref_ew}.FCStd")
+        if not os.path.isfile(fcstd_path): continue
+        try:
+            td = App.openDocument(fcstd_path)
+        except Exception:
+            continue
+        try:
+            for p in td.Objects:
+                m2 = re_single.match(p.Label or "")
+                if not m2: continue
+                pref_single = m2.group(1)
+                sd = single_data.setdefault(pref_single, {"ilosc":0,"dlugosc":0.0,"szer":0.0,"wys":0.0,"nazwa":"?","ews": set()})
+                sd["ilosc"] += 1
+                sd["ews"].add(pref_ew)
+        finally:
+            try:
+                App.closeDocument(td.Name)
+            except Exception:
+                pass
+
+    for pref, data in single_data.items():
+        fcstd_path = os.path.join(single_dir, f"{pref}.FCStd")
+        if not os.path.isfile(fcstd_path): continue
+        try:
+            td = App.openDocument(fcstd_path)
+        except Exception:
+            continue
+        try:
+            for o in td.Objects:
+                if hasattr(o, "Shape") and o.Shape and not o.Shape.isNull():
+                    L,W,H = _get_dims_from_bbox(o)
+                    data["dlugosc"] = max(data["dlugosc"], L)
+                    data["szer"]    = max(data["szer"], W)
+                    data["wys"]     = max(data["wys"], H)
+                    if data["nazwa"] == "?":
+                        if o.Label and o.Label.lower() != "line":
+                            data["nazwa"] = o.Label
+        finally:
+            try:
+                App.closeDocument(td.Name)
+            except Exception:
+                pass
+
+    for k,v in single_data.items():
+        if isinstance(v.get("ews"), set):
+            v["ews"] = sorted(list(v["ews"]))
+
+    return single_data
+
+def export_single_data_to_file(single_data, tmp_file):
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(single_data, f, indent=2)
+        log(f"[DEBUG] Zapisano dane EP do {tmp_file}")
+    except Exception as e:
+        log(f"[DEBUG] Nie udało się zapisać tmp: {e}")
+
+# --- Import do arkusza BOM per EW (z wyczyszczeniem obszaru) ---
+def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, single_dir=None):
+    if not tmp_file or not os.path.isfile(tmp_file):
+        log(f"[DEBUG] brak tmp_file: {tmp_file}")
+        return None
+
+    try:
+        with open(tmp_file, "r", encoding="utf-8") as f:
+            single_data = json.load(f)
+    except Exception as e:
+        log(f"[DEBUG] Nie można odczytać tmp_file: {e}")
+        return None
+
+    ew_prefix = (ew_label.split("_")[0]).strip()
+
+    filtered = []
+    for pref, data in single_data.items():
+        owners = data.get("ews") or []
+        try:
+            if ew_prefix in owners:
+                filtered.append(pref)
+        except Exception:
+            if str(ew_prefix) in str(owners):
+                filtered.append(pref)
+
+    log(f"[DEBUG] EW {ew_label} prefix={ew_prefix} -> total EP keys={len(single_data)}; matched={len(filtered)}; matched_list={sorted(filtered)}")
+
+    if not filtered and main_dir:
+        main_fcstd = os.path.join(main_dir, f"{ew_prefix}.FCStd")
+        if os.path.isfile(main_fcstd):
+            try:
+                td = App.openDocument(main_fcstd)
+            except Exception as e:
+                log(f"[DEBUG] Nie można otworzyć {main_fcstd}: {e}")
+                td = None
+            if td:
+                try:
+                    re_single = re.compile(r"^(\d{4})_")
+                    found = []
+                    for o in td.Objects:
+                        m = re_single.match(o.Label or "")
+                        if m:
+                            found.append(m.group(1))
+                    filtered = [k for k in found if k in single_data]
+                    log(f"[DEBUG] Fallback: filtered_keys present in tmp_file: {filtered}")
+                finally:
+                    try: App.closeDocument(td.Name)
+                    except Exception: pass
+
+    if not filtered:
+        log(f"[DEBUG] Brak wpisów dla EW {ew_label} po filtrowaniu i fallbackzie")
+        return None
+
+    sheet_name = f"BOM_{ew_label}"
+    if sheet_name in doc.Objects:
+        sheet = doc.getObject(sheet_name)
+        # deterministyczne wyczyszczenie obszaru A1..F{max_rows}
+        try:
+            max_rows = 500
+            cols = ['A','B','C','D','E','F']
+            for r in range(1, max_rows+1):
+                for c in cols:
+                    try:
+                        sheet.set(f"{c}{r}", "")
+                    except Exception:
+                        pass
+        except Exception:
+            try:
+                sheet.clearAll()
+            except Exception:
+                pass
+    else:
+        sheet = doc.addObject("Spreadsheet::Sheet", sheet_name)
+
+    try:
+        sheet.set("A1", f"LISTA ELEMENTÓW POJEDYNCZYCH DLA EW {ew_prefix}")
+        sheet.set("A2","Nr")
+        sheet.set("B2","Nazwa")
+        sheet.set("C2","Ilość")
+        sheet.set("D2","Długość [mm]")
+        sheet.set("E2","Szerokość [mm]")
+        sheet.set("F2","Wysokość [mm]")
+    except Exception as e:
+        log(f"[DEBUG] Błąd przy wpisywaniu nagłówków do {sheet_name}: {e}")
+
+    row = 3
+    for pref in sorted(filtered):
+        data = single_data.get(pref, {})
+        try:
+            sheet.set(f"A{row}", pref)
+            sheet.set(f"B{row}", data.get("nazwa","?"))
+            sheet.set(f"C{row}", str(data.get("ilosc",0)))
+            sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
+            sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
+            sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
+        except Exception as e:
+            log(f"[DEBUG] Błąd przy wstawianiu wiersza {row} do {sheet_name}: {e}")
+        row += 1
+
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+    log(f"[DEBUG] Utworzono sheet {sheet_name} z {len(filtered)} wpisami (zakres A1:F{row-1})")
+    return sheet
+
+# --- Pomocnik: policz zapełnione wiersze i kolumny w arkuszu ---
+def sheet_filled_size(sheet):
+    max_col = 0
+    max_row = 0
+    cols = [chr(c) for c in range(ord('A'), ord('Z')+1)]
+    for c_idx, c in enumerate(cols, start=1):
+        found_in_col = False
+        for r in range(1, 2000):
+            try:
+                val = sheet.get(f"{c}{r}")
+            except Exception:
+                val = None
+            if val is not None and str(val).strip() != "":
+                found_in_col = True
+                if r > max_row: max_row = r
+        if found_in_col:
+            max_col = c_idx
+    if max_col == 0 and max_row == 0:
+        return 1, 1
+    if max_row < 2:
+        max_row = 2
+    return max_row, max_col
+
+# --- Rysunki + ustawienie tabeli z dynamicznym X/Y ---
+def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, single_dir):
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    tpl_path = os.path.join(tpl_dir, template_name)
+    if not os.path.isfile(tpl_path):
+        log(f"!!! Nie znaleziono szablonu: {tpl_path}")
+        return
+
+    try:
+        num, den = scale_str.split(":")
+        scale_val = float(num) / float(den)
+    except:
+        scale_val = 1.0
+
+    log(f"--- Dokument {doc.Label} zawiera {len(doc.Objects)} obiektów ---")
+    for obj in doc.Objects:
+        log(f"Obiekt: {obj.Label}, TypeId={obj.TypeId}")
+
+    for obj in doc.Objects:
+        if obj.TypeId in ("App::Part", "Part::FeaturePython"):
+            try:
+                template = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_{obj.Label}")
+                template.Template = tpl_path
+                page = doc.addObject('TechDraw::DrawPage', f"Page_{obj.Label}")
+                page.Template = template
+
+                max_dim = 3000.0
+                margin  = 30.0
+                view_size = max_dim * scale_val
+                offset_y = view_size/2 + margin
+                offset_x = view_size + margin
+
+                view_xy = doc.addObject('TechDraw::DrawViewPart', f"ViewXY_{obj.Label}")
+                view_xy.Source = [obj]
+                view_xy.Direction = (0,0,1)
+                view_xy.ScaleType = "Custom"
+                view_xy.Scale = scale_val
+                page.addView(view_xy)
+                view_xy.X = 0
+                view_xy.Y = offset_y
+
+                view_xz = doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{obj.Label}")
+                view_xz.Source = [obj]
+                view_xz.Direction = (0,1,0)
+                view_xz.ScaleType = "Custom"
+                view_xz.Scale = scale_val
+                page.addView(view_xz)
+                view_xz.X = 0
+                view_xz.Y = -offset_y
+
+                view_iso = doc.addObject('TechDraw::DrawViewPart', f"ViewISO_{obj.Label}")
+                view_iso.Source = [obj]
+                view_iso.Direction = (1,1,1)
+                view_iso.ScaleType = "Custom"
+                view_iso.Scale = scale_val
+                page.addView(view_iso)
+                view_iso.X = offset_x
+                view_iso.Y = -offset_y
+
+                pw = float(template.Width)
+                ph = float(template.Height)
+                page_center_x = pw / 2
+                page_center_y = ph / 2
+                min_x = min(float(view_xy.X), float(view_iso.X))
+                max_x = max(float(view_xy.X), float(view_iso.X))
+                center_group_x = (min_x + max_x) / 2
+                dx = page_center_x - center_group_x
+                dy = page_center_y
+                for v in [view_xy, view_xz, view_iso]:
+                    v.X = float(v.X) + dx
+                    v.Y = float(v.Y) + dy
+
+                log(f">>> Utworzono rysunek dla {obj.Label} w skali {scale_str}")
+
+                sheet = None
+                if tmp_file:
+                    sheet = import_single_data_to_sheet_for_ew(doc, tmp_file, obj.Label, main_dir=main_dir, single_dir=single_dir)
+                else:
+                    sheet = import_single_data_to_sheet_for_ew(doc, "", obj.Label)
+
+                if sheet:
+                    last_row = 2
+                    try:
+                        r = 3
+                        while True:
+                            val = sheet.get(f"A{r}")
+                            if val is None or str(val).strip() == "":
+                                break
+                            last_row = r
+                            r += 1
+                    except Exception:
+                        pass
+
+                    cell_start = "A1"
+                    cell_end = f"F{last_row}"
+
+                    try:
+                        doc.recompute()
+                    except Exception:
+                        pass
+
+                    table_view = doc.addObject("TechDraw::DrawViewSpreadsheet", f"Table_{obj.Label}")
+                    table_view.Source = sheet
+
+                    try:
+                        table_view.CellStart = cell_start
+                        table_view.CellEnd = cell_end
+                    except Exception:
+                        try:
+                            vo = table_view.ViewObject
+                            if hasattr(vo, "CellStart"):
+                                vo.CellStart = cell_start
+                            if hasattr(vo, "CellEnd"):
+                                vo.CellEnd = cell_end
+                        except Exception:
+                            pass
+
+                    try:
+                        vo = table_view.ViewObject
+                        if hasattr(vo, "FontSize"):
+                            vo.FontSize = 10
+                        if hasattr(vo, "RowHeight"):
+                            vo.RowHeight = 6
+                        vo.Visibility = True
+                    except Exception:
+                        pass
+
+                    try:
+                        table_view.Width = 160.0
+                        table_view.Height = 90.0
+                    except Exception:
+                        pass
+
+                    page.addView(table_view)
+
+                    # recompute przed odczytem sheet
+                    try: table_view.recompute()
+                    except Exception: pass
+                    try: doc.recompute()
+                    except Exception: pass
+
+                    # Oblicz rozmiar wyświetlanej tabeli na podstawie zapełnionych komórek
+                    filled_rows, filled_cols = sheet_filled_size(sheet)
+                    row_height_mm = 6.0
+                    col_width_mm = 25.0
+                    table_h_mm = filled_rows * row_height_mm
+                    table_w_mm = filled_cols * col_width_mm
+                    margin_base = 30.0
+                    safe_offset = 2.0
+                    center_x = margin_base + safe_offset + (table_w_mm / 2.0)
+                    center_y = margin_base + safe_offset + (table_h_mm / 2.0)
+
+                    # przypisz X/Y
+                    try:
+                        table_view.X = center_x
+                        table_view.Y = center_y
+                    except Exception:
+                        pass
+                    try:
+                        vo = table_view.ViewObject
+                        if hasattr(vo, "X"):
+                            try: vo.X = center_x
+                            except Exception: pass
+                        if hasattr(vo, "Y"):
+                            try: vo.Y = center_y
+                            except Exception: pass
+                    except Exception:
+                        pass
+
+                    try: table_view.recompute()
+                    except Exception: pass
+                    try: doc.recompute()
+                    except Exception: pass
+
+                    log(f"[DEBUG] Dodano tabelę BOM (sheet {sheet.Name}) dla {obj.Label} cell_range={cell_start}:{cell_end} pos={center_x},{center_y} size_mm={table_w_mm}x{table_h_mm} filled_r={filled_rows} filled_c={filled_cols}")
+                else:
+                    log(f"[DEBUG] Brak danych EP dla {obj.Label}")
+
+            except Exception as e:
+                log(f"!!! Błąd przy tworzeniu rysunku dla {obj.Label}: {e}")
+
+    try:
+        doc.recompute()
+        doc.save()
+    except Exception:
+        pass
+
+# --- ENTRYPOINT ---
+try:
+    proj_dir   = get_project_dir()
+    single_dir = os.path.join(proj_dir, "SINGLE")
+    main_dir   = os.path.join(proj_dir, "MAIN")
+    draw_dir   = os.path.join(proj_dir, "DRAWINGS")
+    os.makedirs(draw_dir, exist_ok=True)
+
+    log("=== START CREATE_DRAWINGS ===")
+
+    create_assembly("SINGLE_ASSEMBLY", single_dir, draw_dir)
+    main_doc = create_assembly("MAIN_ASSEMBLY", main_dir, draw_dir)
+
+    tmp_file = os.path.join(proj_dir, "bom_ep_tmp.json")
+    single_data = collect_single_data(main_doc, single_dir, main_dir)
+    export_single_data_to_file(single_data, tmp_file)
+
+    try:
+        with open(tmp_file, "r", encoding="utf-8") as _f:
+            jd = json.load(_f)
+        log(f"[DEBUG] tmp_file={tmp_file}")
+        log(f"[DEBUG] total EP keys: {len(jd)} -> {sorted(jd.keys())[:200]}")
+    except Exception as e:
+        log(f"[DEBUG] Nie można odczytać tmp_file: {e}")
+
+    if main_doc:
+        chosen_tpl, chosen_scale = select_template_and_scale()
+        if chosen_tpl and chosen_scale:
+            log(f"Wybrano szablon: {chosen_tpl}, skala: {chosen_scale}")
+            create_drawings_for_main(main_doc, chosen_tpl, chosen_scale, tmp_file, main_dir, single_dir)
+        else:
+            log("!!! Nie wybrano szablonu lub skali – pomijam generowanie rysunków")
+
+    if os.path.isfile(tmp_file):
+        try:
+            os.remove(tmp_file)
+            log(f"[DEBUG] Usunięto plik tymczasowy {tmp_file}")
+        except Exception as e:
+            log(f"[DEBUG] Nie udało się usunąć pliku tymczasowego: {e}")
+
+    log("=== KONIEC CREATE_DRAWINGS ===")
+
+except Exception as e:
+    log(f"!!! FAIL: {e}")
