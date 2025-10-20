@@ -630,7 +630,7 @@ try:
 
     log("=== START CREATE_DRAWINGS ===")
 
-    create_assembly("SINGLE_ASSEMBLY", single_dir, draw_dir)
+    # create_assembly("SINGLE_ASSEMBLY", single_dir, draw_dir)  # removed: SINGLE_ASSEMBLY not needed
     main_doc = create_assembly("MAIN_ASSEMBLY", main_dir, draw_dir)
 
     tmp_file = os.path.join(proj_dir, "bom_ep_tmp.json")
