@@ -5,7 +5,7 @@ from PySide2 import QtWidgets
 
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
 # Tworzy stronę TechDraw z siatką widoków SINGLE oraz tabelą BOM.
-# Zmiany: merge A1:I1 i CellEnd = I(last_row+1).
+# Zmiany: merge A1:I1 i CellEnd = I(last_row + 1).
 
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
@@ -32,7 +32,8 @@ def select_template_and_scale():
     scale_layout = QtWidgets.QHBoxLayout()
     scale_label = QtWidgets.QLabel("Skala:")
     scale_combo = QtWidgets.QComboBox()
-    scale_combo.addItems(["1:1", "1:5", "1:10", "1:20", "1:50", "1:100"])
+    # Zmieniona lista skal zgodnie z prośbą
+    scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
     scale_layout.addWidget(scale_label)
     scale_layout.addWidget(scale_combo)
     layout.addLayout(scale_layout)
@@ -293,7 +294,7 @@ def set_view_position_via_viewobject(view, x, y):
         except Exception:
             return False
 
-# --- Main function ---
+# --- Główna funkcja tworząca stronę, widoki i tabelę ---
 def create_single_overview_grid_centered_with_table(main_doc, single_doc, template_name, scale_str, single_data):
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     tpl_path = os.path.join(tpl_dir, template_name)
