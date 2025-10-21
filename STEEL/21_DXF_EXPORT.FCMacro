@@ -1,0 +1,50 @@
+import FreeCAD, FreeCADGui, os, subprocess, datetime
+
+EXPORT_DIR   = r"C:\_EXPORT"
+INKSCAPE_EXE = r"C:\Program Files\Inkscape\bin\inkscape.exe"
+
+def c(m): FreeCAD.Console.PrintMessage(m + "\n")
+def e(m): FreeCAD.Console.PrintError(m + "\n")
+
+def main():
+    doc = FreeCAD.ActiveDocument
+    if not doc:
+        return e("Brak aktywnego dokumentu")
+
+    # wybierz stronę (zaznaczona preferowana)
+    pages = [o for o in doc.Objects if o.TypeId.startswith("TechDraw::DrawPage")]
+    if not pages:
+        return e("Brak stron TechDraw")
+    page = None
+    try:
+        sel = FreeCADGui.Selection.getSelection()
+        if sel and sel[0].TypeId.startswith("TechDraw::DrawPage"):
+            page = sel[0]
+    except: pass
+    if page is None: page = pages[0]
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    svg_path = os.path.join(EXPORT_DIR, f"{page.Label}_{ts}.svg")
+    dxf_path = os.path.join(EXPORT_DIR, f"{page.Label}_{ts}.dxf")
+
+    # Eksport SVG
+    try:
+        import TechDrawGui
+        TechDrawGui.exportPageAsSvg(page, svg_path)
+        c("Wyeksportowano SVG: " + svg_path)
+    except Exception as ex:
+        return e("Błąd eksportu SVG: " + str(ex))
+
+    # Konwersja w Inkscape
+    if not os.path.exists(INKSCAPE_EXE):
+        return e("Nie znaleziono Inkscape pod: " + INKSCAPE_EXE)
+    cmd = [INKSCAPE_EXE, "--batch-process", "--export-type=dxf",
+           f"--export-filename={dxf_path}", svg_path]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        c("Utworzono DXF: " + dxf_path)
+    else:
+        e("Inkscape zwrócił błąd:\n" + proc.stderr)
+
+if __name__ == "__main__":
+    main()
