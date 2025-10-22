@@ -1,0 +1,85 @@
+# -*- coding: utf-8 -*-
+import FreeCAD, FreeCADGui, TechDrawGui
+import os, datetime, xml.etree.ElementTree as ET
+
+def clean_hidden_svg(svg_visible, svg_hidden, svg_hidden_clean):
+    # wczytaj oba pliki jako XML
+    tree_vis = ET.parse(svg_visible)
+    root_vis = tree_vis.getroot()
+    tree_hid = ET.parse(svg_hidden)
+    root_hid = tree_hid.getroot()
+
+    # zbierz wszystkie atrybuty 'd' z visible
+    visible_paths = set()
+    for el in root_vis.iter():
+        if "d" in el.attrib:
+            visible_paths.add(el.attrib["d"])
+
+    removed = 0
+    # usuń z hidden elementy, które mają identyczne 'd'
+    for parent in list(root_hid.iter()):
+        for el in list(parent):
+            if "d" in el.attrib and el.attrib["d"] in visible_paths:
+                parent.remove(el)
+                removed += 1
+
+    tree_hid.write(svg_hidden_clean, encoding="utf-8", xml_declaration=True)
+    FreeCAD.Console.PrintMessage(f"Oczyszczono hidden, usunięto {removed} duplikatów\n")
+
+def export_visible_hidden_svg():
+    doc = FreeCAD.ActiveDocument
+    if not doc or not doc.FileName:
+        FreeCAD.Console.PrintError("Dokument musi być zapisany na dysku.\n")
+        return
+
+    # katalog EXPORT obok modelu
+    model_dir = os.path.dirname(doc.FileName)
+    export_dir = os.path.join(model_dir, "EXPORT")
+    os.makedirs(export_dir, exist_ok=True)
+
+    # wybierz stronę (pierwsza lub zaznaczona)
+    pages = [o for o in doc.Objects if o.TypeId.startswith("TechDraw::DrawPage")]
+    if not pages:
+        FreeCAD.Console.PrintError("Brak stron TechDraw.\n")
+        return
+    page = pages[0]
+    try:
+        sel = FreeCADGui.Selection.getSelection()
+        if sel and sel[0].TypeId.startswith("TechDraw::DrawPage"):
+            page = sel[0]
+    except: 
+        pass
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    svg_visible = os.path.join(export_dir, f"{page.Label}_{ts}_visible.svg")
+    svg_hidden_raw = os.path.join(export_dir, f"{page.Label}_{ts}_hidden_raw.svg")
+    svg_hidden_clean = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.svg")
+
+    # --- 1) Eksport widocznych (HardHidden=False) ---
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = False
+    doc.recompute()
+    TechDrawGui.exportPageAsSvg(page, svg_visible)
+    FreeCAD.Console.PrintMessage("Wyeksportowano widoczne: " + svg_visible + "\n")
+
+    # --- 2) Eksport ukrytych (HardHidden=True) ---
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = True
+    doc.recompute()
+    TechDrawGui.exportPageAsSvg(page, svg_hidden_raw)
+    FreeCAD.Console.PrintMessage("Wyeksportowano ukryte (surowe): " + svg_hidden_raw + "\n")
+
+    # --- 3) Oczyszczenie hidden ---
+    clean_hidden_svg(svg_visible, svg_hidden_raw, svg_hidden_clean)
+    FreeCAD.Console.PrintMessage("Gotowy plik ukrytych: " + svg_hidden_clean + "\n")
+
+    # --- 4) Przywróć HardHidden=False ---
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = False
+    doc.recompute()
+
+if __name__ == "__main__":
+    export_visible_hidden_svg()
