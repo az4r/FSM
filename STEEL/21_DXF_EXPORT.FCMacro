@@ -1,66 +1,154 @@
-import FreeCAD, FreeCADGui, os, subprocess, datetime
+# -*- coding: utf-8 -*-
+import FreeCAD, FreeCADGui, TechDraw
+import os, datetime, re
+import ezdxf
 
-# --- Ustal katalog EXPORT w folderze modelu ---
-doc = FreeCAD.ActiveDocument
-if doc and doc.FileName:
-    model_dir = os.path.dirname(doc.FileName)
-else:
-    # fallback: katalog domowy użytkownika
-    model_dir = os.path.expanduser("~")
-
-EXPORT_DIR = os.path.join(model_dir, "EXPORT")
-os.makedirs(EXPORT_DIR, exist_ok=True)
-
-# --- Ścieżka do Inkscape ---
-INKSCAPE_EXE = r"C:\Program Files\Inkscape\bin\inkscape.exe"
-
-def c(m): FreeCAD.Console.PrintMessage(m + "\n")
-def e(m): FreeCAD.Console.PrintError(m + "\n")
-
-def main():
+def export_visible_hidden_table_dxf():
     doc = FreeCAD.ActiveDocument
-    if not doc:
-        return e("Brak aktywnego dokumentu")
+    if not doc or not doc.FileName:
+        FreeCAD.Console.PrintError("Dokument musi być zapisany na dysku.\n")
+        return
 
-    # wybierz stronę (zaznaczona preferowana)
+    model_dir = os.path.dirname(doc.FileName)
+    export_dir = os.path.join(model_dir, "EXPORT")
+    os.makedirs(export_dir, exist_ok=True)
+
+    # wybierz stronę (pierwsza lub zaznaczona)
     pages = [o for o in doc.Objects if o.TypeId.startswith("TechDraw::DrawPage")]
     if not pages:
-        return e("Brak stron TechDraw")
-
-    page = None
+        FreeCAD.Console.PrintError("Brak stron TechDraw.\n")
+        return
+    page = pages[0]
     try:
         sel = FreeCADGui.Selection.getSelection()
         if sel and sel[0].TypeId.startswith("TechDraw::DrawPage"):
             page = sel[0]
     except:
         pass
-    if page is None:
-        page = pages[0]
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    svg_path = os.path.join(EXPORT_DIR, f"{page.Label}_{ts}.svg")
-    dxf_path = os.path.join(EXPORT_DIR, f"{page.Label}_{ts}.dxf")
+    dxf_visible = os.path.join(export_dir, f"{page.Label}_{ts}_visible.dxf")
+    dxf_hidden  = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.dxf")
+    dxf_final   = os.path.join(export_dir, f"{page.Label}_{ts}_combined.dxf")
 
-    # Eksport SVG
-    try:
-        import TechDrawGui
-        TechDrawGui.exportPageAsSvg(page, svg_path)
-        c("Wyeksportowano SVG: " + svg_path)
-    except Exception as ex:
-        return e("Błąd eksportu SVG: " + str(ex))
+    # 1) Eksport widocznych
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = False
+    doc.recompute()
+    TechDraw.writeDXFPage(page, dxf_visible)
+    FreeCAD.Console.PrintMessage("Wyeksportowano widoczne: " + dxf_visible + "\n")
 
-    # Konwersja w Inkscape
-    if not os.path.exists(INKSCAPE_EXE):
-        return e("Nie znaleziono Inkscape pod: " + INKSCAPE_EXE)
+    # 2) Eksport ukrytych
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = True
+    doc.recompute()
+    TechDraw.writeDXFPage(page, dxf_hidden)
+    FreeCAD.Console.PrintMessage("Wyeksportowano ukryte: " + dxf_hidden + "\n")
 
-    cmd = [INKSCAPE_EXE, "--batch-process", "--export-type=dxf",
-           f"--export-filename={dxf_path}", svg_path]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # 3) Nowy dokument DXF
+    doc_out = ezdxf.new("R2010")
+    msp = doc_out.modelspace()
 
-    if proc.returncode == 0:
-        c("Utworzono DXF: " + dxf_path)
+    # utwórz warstwy
+    doc_out.layers.new(name="Visible")
+    doc_out.layers.new(name="Hidden")
+    doc_out.layers.new(name="Table")
+
+    # dodaj styl tekstu Arial
+    if "Arial" not in doc_out.styles:
+        doc_out.styles.new("Arial", dxfattribs={"font": "arial.ttf"})
+
+    # 4) Funkcja kopiująca encje z pliku źródłowego
+    def copy_entities(srcfile, target_layer):
+        try:
+            src = ezdxf.readfile(srcfile)
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"Błąd czytania {srcfile}: {e}\n")
+            return
+        for e in src.modelspace():
+            try:
+                new_e = e.copy()
+                new_e.dxf.layer = target_layer
+                msp.add_entity(new_e)
+            except Exception as ex:
+                FreeCAD.Console.PrintError(f"Nie udało się skopiować encji: {ex}\n")
+
+    # kopiuj encje
+    copy_entities(dxf_visible, "Visible")
+    copy_entities(dxf_hidden, "Hidden")
+
+    # 5) Szukaj tabeli TechDraw i jej źródła Spreadsheet
+    table_views = [v for v in page.Views if v.TypeId == "TechDraw::DrawViewSpreadsheet"]
+    if table_views:
+        tbl = table_views[0]
+        sheet = tbl.Source
+        FreeCAD.Console.PrintMessage(f"Tworzę tabelę z arkusza: {sheet.Label}\n")
+
+        # parametry tabeli
+        cell_w = 30
+        cell_h = 10
+        start_x, start_y = 0, 0
+
+        # znajdź wszystkie niepuste komórki
+        cell_re = re.compile(r"([A-Z]+)(\d+)")
+        cells = []
+        max_row, max_col = 0, 0
+
+        for prop in sheet.PropertiesList:
+            m = cell_re.match(prop)
+            if not m:
+                continue
+            val = sheet.getContents(prop)
+            if not val.strip():
+                continue
+            col_letters, row_str = m.groups()
+            row = int(row_str)
+            # konwersja kolumny np. A=1, B=2, Z=26, AA=27
+            col = 0
+            for ch in col_letters:
+                col = col*26 + (ord(ch)-64)
+            cells.append((row, col, val))
+            max_row = max(max_row, row)
+            max_col = max(max_col, col)
+
+        if not cells:
+            FreeCAD.Console.PrintMessage("Arkusz pusty, brak tabeli do eksportu.\n")
+        else:
+            rows = max_row
+            cols = max_col
+
+            # rysuj siatkę
+            for r in range(rows+1):
+                y = start_y + r*cell_h
+                msp.add_line((start_x, y), (start_x+cols*cell_w, y), dxfattribs={"layer":"Table"})
+            for c in range(cols+1):
+                x = start_x + c*cell_w
+                msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
+
+            # wpisz teksty Arial 2.5mm
+            for row, col, val in cells:
+                x = start_x + (col-1)*cell_w + 2
+                y = start_y + (rows-row)*cell_h + 2
+                msp.add_text(val, dxfattribs={
+                    "height": 2.5,
+                    "layer": "Table",
+                    "style": "Arial",
+                    "insert": (x,y)
+                })
     else:
-        e("Inkscape zwrócił błąd:\n" + proc.stderr)
+        FreeCAD.Console.PrintMessage("Brak tabeli TechDraw na stronie.\n")
+
+    # 6) Zapisz wynik
+    doc_out.saveas(dxf_final)
+    FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą: " + dxf_final + "\n")
+
+    # 7) Przywróć HardHidden=False
+    for v in page.Views:
+        if hasattr(v, "HardHidden"):
+            v.HardHidden = False
+    doc.recompute()
 
 if __name__ == "__main__":
-    main()
+    export_visible_hidden_table_dxf()
