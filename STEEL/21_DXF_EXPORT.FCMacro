@@ -127,11 +127,21 @@ def export_visible_hidden_table_dxf():
                 x = start_x + c*cell_w
                 msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
 
-            # wpisz teksty Arial 2.5mm
+            # wpisz teksty Arial 2.5mm z formatowaniem liczb
             for row, col, val in cells:
+                # spróbuj sformatować jako liczbę
+                try:
+                    num = float(val.replace(",", "."))
+                    if num.is_integer():
+                        val_fmt = str(int(num))
+                    else:
+                        val_fmt = "{:.2f}".format(num)
+                except:
+                    val_fmt = val  # jeśli nie liczba, zostaw oryginał
+
                 x = start_x + (col-1)*cell_w + 2
                 y = start_y + (rows-row)*cell_h + 2
-                msp.add_text(val, dxfattribs={
+                msp.add_text(val_fmt, dxfattribs={
                     "height": 2.5,
                     "layer": "Table",
                     "style": "Arial",
