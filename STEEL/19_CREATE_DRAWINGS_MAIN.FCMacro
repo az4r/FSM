@@ -332,16 +332,16 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
 
     # nagłówki (A..I)
     try:
-        sheet.set("A1", f"LISTA ELEMENTÓW POJEDYNCZYCH DLA EW {ew_prefix}")
-        sheet.set("A2","Nr")
-        sheet.set("B2","Nazwa")
-        sheet.set("C2","Ilość")
-        sheet.set("D2","Długość [mm]")
-        sheet.set("E2","Szerokość [mm]")
-        sheet.set("F2","Wysokość [mm]")
-        sheet.set("G2","Gatunek stali")
-        sheet.set("H2","Waga elementu [kg]")
-        sheet.set("I2","Waga łącznie [kg]")
+        sheet.set("A1", f"LIST OF SINGLE ELEMENTS AT MAIN ELEMENT {ew_prefix}")
+        sheet.set("A2","ITEM")
+        sheet.set("B2","NAME")
+        sheet.set("C2","QUANTITY (pcs.)")
+        sheet.set("D2","LENGHT [mm]")
+        sheet.set("E2","WIDTH [mm]")
+        sheet.set("F2","HEIGHT [mm]")
+        sheet.set("G2","MATERIAL")
+        sheet.set("H2","WEIGHT OF 1 pcs. [kg]")
+        sheet.set("I2","WEIGHT [kg]")
 
         # spróbuj zmergować A1:I1 - kilka wariantów API, każda próba w try/except
         try:
@@ -393,7 +393,7 @@ def import_single_data_to_sheet_for_ew(doc, tmp_file, ew_label, main_dir=None, s
 
     # Podsumowanie wagi pod tabelą
     try:
-        sheet.set(f"H{row}", "Całkowita waga [kg]")
+        sheet.set(f"H{row}", "TOTAL WEIGHT [kg]")
         sheet.set(f"I{row}", f"{total_weight:.3f}")
     except Exception:
         pass

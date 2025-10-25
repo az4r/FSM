@@ -449,16 +449,16 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
         # headers A1..I2
         try:
-            sheet.set("A1", "LISTA ELEMENTÓW POJEDYNCZYCH")
-            sheet.set("A2","Nr")
-            sheet.set("B2","Nazwa")
-            sheet.set("C2","Ilość")
-            sheet.set("D2","Długość [mm]")
-            sheet.set("E2","Szerokość [mm]")
-            sheet.set("F2","Wysokość [mm]")
-            sheet.set("G2","Gatunek stali")
-            sheet.set("H2","Waga elementu [kg]")
-            sheet.set("I2","Waga łącznie [kg]")
+            sheet.set("A1", "LIST OF SINGLE ELEMENTS")
+            sheet.set("A2","ITEM")
+            sheet.set("B2","NAME")
+            sheet.set("C2","QUANTITY (pcs.)")
+            sheet.set("D2","LENGHT [mm]")
+            sheet.set("E2","WIDTH [mm]")
+            sheet.set("F2","HEIGHT [mm]")
+            sheet.set("G2","MATERIAL")
+            sheet.set("H2","WEIGHT OF 1 pcs. [kg]")
+            sheet.set("I2","WEIGHT [kg]")
         except Exception:
             pass
 
@@ -503,7 +503,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
         # summary
         try:
-            sheet.set(f"H{row}", "Całkowita waga [kg]")
+            sheet.set(f"H{row}", "TOTAL WEIGHT [kg]")
             sheet.set(f"I{row}", f"{total_weight:.3f}")
         except Exception:
             pass
