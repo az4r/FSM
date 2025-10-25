@@ -3,12 +3,35 @@ import a2p_importpart
 import TechDraw
 from PySide2 import QtWidgets
 
-# 20_CREATE_DRAWINGS_SINGLE.FCMacro
-# Tworzy stronę TechDraw z siatką widoków SINGLE oraz tabelą BOM.
-# Zmiany: merge A1:I1 i CellEnd = I(last_row + 1).
+# Stałe szerokości kolumn (synchronizowane z 19_CREATE_DRAWINGS_MAIN)
+DEFAULT_COLUMN_WIDTH = 125   # szerokość kolumny w arkuszu (px)
+POSITION_COLUMN_WIDTH = 33   # szerokość kolumny używana do pozycjonowania tabeli (mm)
 
+# --- Logger ---
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
+
+# --- Helper: ustaw szerokości kolumn w arkuszu Spreadsheet ---
+def apply_fixed_column_widths_to_sheet(sheet, width_px, cell_start="A1", cell_end="I999"):
+    try:
+        width_px = int(width_px)
+    except Exception:
+        width_px = 100
+    try:
+        start_col = re.match(r"([A-Z]+)", cell_start).group(1)
+        end_col   = re.match(r"([A-Z]+)", cell_end).group(1)
+    except Exception:
+        start_col, end_col = "A", "I"
+    for c_ord in range(ord(start_col), ord(end_col) + 1):
+        col_letter = chr(c_ord)
+        try:
+            sheet.setColumnWidth(col_letter, width_px)
+        except Exception:
+            try:
+                if hasattr(sheet, "setColumnWidthInPixels"):
+                    sheet.setColumnWidthInPixels(col_letter, width_px)
+            except Exception:
+                pass
 
 def get_project_dir():
     if App.ActiveDocument and getattr(App.ActiveDocument, "FileName", ""):
@@ -20,7 +43,7 @@ def list_templates():
     if not os.path.isdir(tpl_dir):
         log(f"!!! Nie znaleziono katalogu Templates: {tpl_dir}")
         return []
-    return [f for f in os.listdir(tpl_dir) if f.lower().endswith(".svg")]
+    return [f for f in os.listdir(tpl_dir) if f.lower().endswith("svg")]
 
 def select_template_and_scale():
     files = list_templates()
@@ -32,7 +55,6 @@ def select_template_and_scale():
     scale_layout = QtWidgets.QHBoxLayout()
     scale_label = QtWidgets.QLabel("Skala:")
     scale_combo = QtWidgets.QComboBox()
-    # Zmieniona lista skal zgodnie z prośbą
     scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
     scale_layout.addWidget(scale_label)
     scale_layout.addWidget(scale_combo)
@@ -198,7 +220,7 @@ def create_single_assembly_and_open(docname, single_dir, draw_dir):
         pass
     files = []
     if os.path.isdir(single_dir):
-        files = [f for f in os.listdir(single_dir) if f.lower().endswith(".fcstd")]
+        files = [f for f in os.listdir(single_dir) if f.lower().endswith("fcstd")]
     if not files:
         log(f"!!! Brak plików w katalogu: {single_dir}")
         return doc
@@ -259,7 +281,7 @@ def choose_main_document(draw_dir, main_dir):
             pass
     if os.path.isdir(main_dir):
         for fname in os.listdir(main_dir):
-            if fname.lower().endswith(".fcstd"):
+            if fname.lower().endswith("fcstd"):
                 fp = os.path.join(main_dir, fname)
                 try:
                     md = App.openDocument(fp)
@@ -434,7 +456,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         if sheet_name in single_doc.Objects:
             sheet = single_doc.getObject(sheet_name)
             try:
-                # deterministic clear A1..I{max_rows}
                 max_rows = 500
                 cols = ['A','B','C','D','E','F','G','H','I']
                 for r in range(1, max_rows+1):
@@ -528,6 +549,14 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         cell_start = "A1"
         cell_end = f"I{last_row + 1}"
 
+        # --- Ustaw szerokości kolumn na arkuszu PRZED dodaniem widoku tabeli ---
+        try:
+            apply_fixed_column_widths_to_sheet(sheet, DEFAULT_COLUMN_WIDTH, cell_start, cell_end)
+            try: single_doc.recompute()
+            except Exception: pass
+        except Exception:
+            pass
+
         table_view = single_doc.addObject("TechDraw::DrawViewSpreadsheet", "Table_SingleOverview")
         table_view.Source = sheet
         try:
@@ -583,10 +612,10 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             return max_row, max_col
 
         filled_rows, filled_cols = sheet_filled_size(sheet)
-        # ensure we include summary row in height
         if filled_rows < (last_row + 1):
             filled_rows = last_row + 1
-        row_height_mm = 6.0; col_width_mm = 25.0
+
+        row_height_mm = 6.0; col_width_mm = POSITION_COLUMN_WIDTH
         table_h_mm = filled_rows * row_height_mm
         table_w_mm = filled_cols * col_width_mm
         margin_base = 30.0; safe_offset = 2.0
@@ -597,7 +626,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         center_x = left_margin + safe_offset + (table_w_mm / 2.0)
         center_y = bottom_margin + safe_offset + (table_h_mm / 2.0)
 
-        # Deterministic write: exactly center_x, center_y to ViewObject, object and Placement.Base
         pos_x = float(center_x)
         pos_y = float(center_y)
 
