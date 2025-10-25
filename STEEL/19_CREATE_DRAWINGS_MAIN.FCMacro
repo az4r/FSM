@@ -3,9 +3,38 @@ import a2p_importpart
 import TechDraw
 from PySide2 import QtWidgets
 
+# Stałe szerokości kolumn
+DEFAULT_COLUMN_WIDTH = 125   # szerokość kolumny w arkuszu (px)
+POSITION_COLUMN_WIDTH = 33   # szerokość kolumny używana do pozycjonowania tabeli (mm)
+
 # --- Logger ---
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
+
+# --- Helper: ustaw szerokości kolumn w arkuszu Spreadsheet ---
+def apply_fixed_column_widths_to_sheet(sheet, width_px, cell_start="A1", cell_end="I999"):
+    try:
+        width_px = int(width_px)
+    except Exception:
+        width_px = 100
+    # spróbuj wyciągnąć litery kolumn z cell_start/cell_end
+    try:
+        start_col = re.match(r"([A-Z]+)", cell_start).group(1)
+        end_col   = re.match(r"([A-Z]+)", cell_end).group(1)
+    except Exception:
+        start_col, end_col = "A", "I"
+    for c_ord in range(ord(start_col), ord(end_col) + 1):
+        col_letter = chr(c_ord)
+        try:
+            # preferowana metoda
+            sheet.setColumnWidth(col_letter, width_px)
+        except Exception:
+            # fallback dla alternatywnych implementacji
+            try:
+                if hasattr(sheet, "setColumnWidthInPixels"):
+                    sheet.setColumnWidthInPixels(col_letter, width_px)
+            except Exception:
+                pass
 
 # --- Projekt ---
 def get_project_dir():
@@ -531,6 +560,14 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                     except Exception:
                         pass
 
+                    # --- USTAW SZEROKOŚCI KOLUMN NA ARKUSZU PRZED DODANIEM WIDOKU ---
+                    try:
+                        apply_fixed_column_widths_to_sheet(sheet, DEFAULT_COLUMN_WIDTH, cell_start, cell_end)
+                        try: doc.recompute()
+                        except Exception: pass
+                    except Exception:
+                        pass
+
                     table_view = doc.addObject("TechDraw::DrawViewSpreadsheet", f"Table_{obj.Label}")
                     table_view.Source = sheet
 
@@ -577,7 +614,8 @@ def create_drawings_for_main(doc, template_name, scale_str, tmp_file, main_dir, 
                     if filled_rows < last_row + 1:
                         filled_rows = last_row + 1
                     row_height_mm = 6.0
-                    col_width_mm = 25.0
+                    # używamy stałej do pozycji, żeby tabela nie przesuwała się gdy zmienimy DEFAULT_COLUMN_WIDTH
+                    col_width_mm = POSITION_COLUMN_WIDTH
                     table_h_mm = filled_rows * row_height_mm
                     table_w_mm = filled_cols * col_width_mm
                     margin_base = 30.0
