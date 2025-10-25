@@ -209,20 +209,20 @@ else:
 
 # Nagłówek (bez scalania)
 try:
-    sheet.set("A1", "LISTA ELEMENTÓW WYSYŁKOWYCH")
+    sheet.set("A1", "LIST OF MAIN ELEMENTS")
 except Exception:
     pass
 
 # Nagłówki kolumn (od wiersza 2)
-sheet.set("A2", "Nr EW")
-sheet.set("B2", "Nazwa")
-sheet.set("C2", "Ilość")
-sheet.set("D2", "Długość [mm]")
-sheet.set("E2", "Szerokość [mm]")
-sheet.set("F2", "Wysokość [mm]")
-sheet.set("G2", "Gatunek stali")
-sheet.set("H2", "Waga elementu [kg]")
-sheet.set("I2", "Waga łącznie [kg]")
+sheet.set("A2", "ITEM")
+sheet.set("B2", "NAME")
+sheet.set("C2", "QUANTITY (pcs.)")
+sheet.set("D2", "LENGHT [mm]")
+sheet.set("E2", "WIDTH [mm]")
+sheet.set("F2", "HEIGHT [mm]")
+sheet.set("G2", "MATERIAL")
+sheet.set("H2", "WEIGHT OF 1 pcs. [kg]")
+sheet.set("I2", "WEIGHT [kg]")
 
 row = 3
 total_weight = 0.0
@@ -251,7 +251,7 @@ for pref, data in sorted(ew_data.items()):
     row += 1
 
 # Podsumowanie pod tabelą
-sheet.set(f"H{row}", "Całkowita waga [kg]")
+sheet.set(f"H{row}", "TOTAL WEIGHT [kg]")
 sheet.set(f"I{row}", f"{total_weight:.3f}")
 
 try:
