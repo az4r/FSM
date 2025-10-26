@@ -329,35 +329,59 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         scale_val = 1.0
 
+    # --- BEGIN: logic from VIEWPORTS.txt (grid multi-page viewport placement) ---
+    # maksymalny rozmiar elementu w modelu (mm)
+    max_element_mm = 6000.0
+    # rozmiar ramki na arkuszu (mm) potrzebny by zmieścić element max_element_mm w danej skali
+    view_size = max_element_mm * scale_val
+
+    # odstępy/marginesy (mm) na arkuszu
+    margin = 15.0
+    gap = 10.0
+    offset_x = view_size + gap
+    offset_y = view_size + gap
+
+    # utwórz pierwszy template/page
     template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
     template_obj.Template = tpl_path
     page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
     page.Template = template_obj
 
-    # grid params
-    max_dim = 3000.0
-    margin  = 30.0
-    view_size = max_dim * scale_val
-    offset_x = view_size + margin
-    offset_y = view_size/2 + margin
-
-    # template dims
+    # odczytaj rozmiar szablonu (mm)
     try:
         pw = float(template_obj.Width)
         ph = float(template_obj.Height)
     except Exception:
         pw = 210.0; ph = 297.0
 
+    # oblicz ile kolumn i wierszy mieści się na stronie
     usable_w = pw - 2*margin
+    usable_h = ph - 2*margin
     cols_fit = max(1, int(usable_w // offset_x))
-    if cols_fit < 1: cols_fit = 1
+    rows_fit = max(1, int(usable_h // offset_y))
+    log(f"[GRID] page W={pw} H={ph} scale={scale_val} view_size={view_size:.2f} cols_fit={cols_fit} rows_fit={rows_fit}")
 
-    log(f"[GRID] page W={pw} H={ph} scale={scale_val} view_size={view_size} cols={cols_fit}")
+    left_start = margin + view_size/2.0
+    top_start = ph - margin - view_size/2.0
 
-    created = []
+    items = sorted(single_data.keys())
+    page_index = 0
+    cell_index = 0
+
+    def new_page(doc, tpl_path, page_index):
+        t = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_SingleOverview_{page_index}")
+        t.Template = tpl_path
+        p = doc.addObject('TechDraw::DrawPage', f"Page_SingleOverview_{page_index}")
+        p.Template = t
+        return t, p
+
+    current_template = template_obj
+    current_page = page
+
+    created_views = []
     created_prefs = []
-    idx = 0
-    for pref in sorted(single_data.keys()):
+
+    for pref in items:
         src = None
         for o in single_doc.Objects:
             try:
@@ -366,91 +390,65 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             except Exception:
                 continue
         if not src:
-            for o in single_doc.Objects:
-                try:
-                    if pref in (o.Label or ""):
-                        src = o; break
-                except Exception:
-                    continue
-        if not src:
             log(f"[WARN] Nie znaleziono obiektu SINGLE dla {pref} w SINGLE_ASSEMBLY; pomijam")
-            idx += 1
             continue
 
-        col = idx % cols_fit
-        row = idx // cols_fit
+        # obliczenia: kolumna i wiersz — wypełnianie pionowo (góra->dół), potem kolumny w prawo
+        page_slot = cell_index // (cols_fit * rows_fit)
+        index_in_page = cell_index % (cols_fit * rows_fit)
+        col = index_in_page // rows_fit
+        row = index_in_page % rows_fit
 
-        gx = col * offset_x + view_size / 2.0
-        gy = -(row * offset_y + view_size / 2.0)  # stack downward
+        # nowa strona jeśli potrzeba
+        if page_slot > page_index:
+            page_index = page_slot
+            current_template, current_page = new_page(single_doc, tpl_path, page_index)
 
-        view = single_doc.addObject('TechDraw::DrawViewPart', f"ViewXZ_{pref}")
-        view.Source = [src]
-        view.Direction = (0,1,0)
-        view.ScaleType = "Custom"
-        view.Scale = scale_val
+        # oblicz środek pola (cx, cy) bez żadnego dodatkowego centrowania
+        cx = left_start + col * offset_x
+        cy = top_start - row * offset_y
 
-        page.addView(view)
-
-        # set temp grid coords
+        # stwórz viewport i dodaj do strony
         try:
-            view.X = float(gx)
-            view.Y = float(gy)
-        except Exception:
-            set_view_position_via_viewobject(view, gx, gy)
-
-        try: view.recompute()
-        except Exception: pass
-
-        created.append(view)
-        created_prefs.append(pref)
-        log(f">>> Stworzono ViewXZ_{pref} grid col={col} row={row} gx={gx:.2f} gy={gy:.2f}")
-        idx += 1
-
-    # center group
-    if created:
-        xs=[]; ys=[]
-        for v in created:
+            view = single_doc.addObject('TechDraw::DrawViewPart', f"View_{pref}")
+            view.Source = [src]
+            view.Direction = (0,1,0)
+            view.ScaleType = "Custom"
+            view.Scale = scale_val
+            current_page.addView(view)
+            # ustaw pozycję widoku (środek ramki)
             try:
-                x = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
-                y = float(getattr(v, "Y", getattr(v.ViewObject, "Y", 0.0)))
-                xs.append(x); ys.append(y)
+                if hasattr(view, "ViewObject") and hasattr(view.ViewObject, "X"):
+                    view.ViewObject.X = float(cx)
+                    view.ViewObject.Y = float(cy)
+                else:
+                    view.X = float(cx)
+                    view.Y = float(cy)
             except Exception:
-                continue
-        if xs and ys:
-            min_x = min(xs) - view_size/2.0
-            max_x = max(xs) + view_size/2.0
-            min_y = min(ys) - view_size/2.0
-            max_y = max(ys) + view_size/2.0
-            group_center_x = (min_x + max_x) / 2.0
-            group_center_y = (min_y + max_y) / 2.0
-
-            page_center_x = pw / 2.0
-            page_center_y = ph / 2.0
-
-            dx = page_center_x - group_center_x
-            dy = page_center_y - group_center_y
-
-            log(f"[CENTER] group cx={group_center_x:.2f} cy={group_center_y:.2f} -> page cx={page_center_x:.2f} cy={page_center_y:.2f} dx={dx:.2f} dy={dy:.2f}")
-
-            for v in created:
                 try:
-                    vx = float(getattr(v, "X", getattr(v.ViewObject, "X", 0.0)))
-                    vy = float(getattr(v, "Y", getattr(v.ViewObject, "Y", 0.0)))
-                    newx = vx + dx
-                    newy = vy + dy
-                    if hasattr(v, "ViewObject") and hasattr(v.ViewObject, "X"):
-                        v.ViewObject.X = float(newx)
-                        v.ViewObject.Y = float(newy)
-                    else:
-                        v.X = float(newx)
-                        v.Y = float(newy)
+                    set_view_position_via_viewobject(view, cx, cy)
                 except Exception:
-                    try:
-                        set_view_position_via_viewobject(v, vx+dx, vy+dy)
-                    except Exception:
-                        pass
+                    pass
+            try: view.recompute()
+            except Exception: pass
+            created_views.append(view)
+            created_prefs.append(pref)
+            log(f">>> View_{pref} page={page_index} col={col} row={row} cx={cx:.2f} cy={cy:.2f}")
+        except Exception as e:
+            log(f"[WARN] Nie udało się utworzyć widoku dla {pref}: {e}")
 
-    # --- create spreadsheet and table ---
+        cell_index += 1
+
+    try:
+        single_doc.recompute()
+        single_doc.save()
+    except Exception:
+        pass
+
+    log(f">>> Utworzono {len(created_views)} widoków na {page_index+1} stronach (bez centrowania, bez linii).")
+    # --- END: logic from VIEWPORTS.txt ---
+
+    # --- create spreadsheet and table (unchanged logic from original 20) ---
     try:
         sheet_name = "BOM_SingleOverview"
         if sheet_name in single_doc.Objects:
@@ -718,7 +716,7 @@ try:
     draw_dir   = os.path.join(proj_dir, "DRAWINGS")
     os.makedirs(draw_dir, exist_ok=True)
 
-    log("=== START CREATE_DRAWINGS_SINGLE (with table) ===")
+    log("=== START CREATE_DRAWINGS_SINGLE (with table + viewports logic) ===")
 
     main_doc = choose_main_document(draw_dir, main_dir)
     if not main_doc:
@@ -738,7 +736,7 @@ try:
 
     create_single_overview_grid_centered_with_table(main_doc, single_doc, tpl, scale, single_data)
 
-    log("=== KONIEC CREATE_DRAWINGS_SINGLE (with table) ===")
+    log("=== KONIEC CREATE_DRAWINGS_SINGLE (with table + viewports logic) ===")
 
 except Exception as e:
     log(f"!!! FAIL: {e}")
