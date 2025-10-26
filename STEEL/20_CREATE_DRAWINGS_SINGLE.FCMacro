@@ -333,7 +333,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     # Grid
     max_element_mm = 6000.0
     view_size = max_element_mm * scale_val
-    margin = 15.0
+    margin = 30.0
     gap = 10.0
     offset_x = view_size + gap
     offset_y = view_size + gap
