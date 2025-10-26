@@ -1,5 +1,5 @@
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
-# Oryginalne makro z repozytorium + automatyczne etykiety (X_CREATE_ANNOTATION) nad każdym widokiem
+# Oryginalne makro z repozytorium + JEDNA zmiana: wyśrodkowanie pary etykiet (Anno_Number_... + Anno_Info_...) jako grupy nad widokiem
 import FreeCAD as App, os, re, json
 import a2p_importpart
 import TechDraw
@@ -331,32 +331,25 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         scale_val = 1.0
 
-    # --- BEGIN: logic from VIEWPORTS.txt (grid multi-page viewport placement) ---
-    # maksymalny rozmiar elementu w modelu (mm)
+    # --- Grid placement (oryginał) ---
     max_element_mm = 6000.0
-    # rozmiar ramki na arkuszu (mm) potrzebny by zmieścić element max_element_mm w danej skali
     view_size = max_element_mm * scale_val
-
-    # odstępy/marginesy (mm) na arkuszu
     margin = 15.0
     gap = 10.0
     offset_x = view_size + gap
     offset_y = view_size + gap
 
-    # utwórz pierwszy template/page
     template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
     template_obj.Template = tpl_path
     page = single_doc.addObject('TechDraw::DrawPage', "Page_SingleOverview")
     page.Template = template_obj
 
-    # odczytaj rozmiar szablonu (mm)
     try:
         pw = float(template_obj.Width)
         ph = float(template_obj.Height)
     except Exception:
         pw = 210.0; ph = 297.0
 
-    # oblicz ile kolumn i wierszy mieści się na stronie
     usable_w = pw - 2*margin
     usable_h = ph - 2*margin
     cols_fit = max(1, int(usable_w // offset_x))
@@ -395,22 +388,18 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             log(f"[WARN] Nie znaleziono obiektu SINGLE dla {pref} w SINGLE_ASSEMBLY; pomijam")
             continue
 
-        # obliczenia: kolumna i wiersz — wypełnianie pionowo (góra->dół), potem kolumny w prawo
         page_slot = cell_index // (cols_fit * rows_fit)
         index_in_page = cell_index % (cols_fit * rows_fit)
         col = index_in_page // rows_fit
         row = index_in_page % rows_fit
 
-        # nowa strona jeśli potrzeba
         if page_slot > page_index:
             page_index = page_slot
             current_template, current_page = new_page(single_doc, tpl_path, page_index)
 
-        # oblicz środek pola (cx, cy) bez żadnego dodatkowego centrowania
         cx = left_start + col * offset_x
         cy = top_start - row * offset_y
 
-        # stwórz viewport i dodaj do strony
         try:
             view = single_doc.addObject('TechDraw::DrawViewPart', f"View_{pref}")
             view.Source = [src]
@@ -418,7 +407,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             view.ScaleType = "Custom"
             view.Scale = scale_val
             current_page.addView(view)
-            # ustaw pozycję widoku (środek ramki)
             try:
                 if hasattr(view, "ViewObject") and hasattr(view.ViewObject, "X"):
                     view.ViewObject.X = float(cx)
@@ -448,9 +436,8 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         pass
 
     log(f">>> Utworzono {len(created_views)} widoków na {page_index+1} stronach (bez centrowania, bez linii).")
-    # --- END: logic from VIEWPORTS.txt ---
 
-    # --- create spreadsheet and table (unchanged logic from original 20) ---
+    # --- create spreadsheet and table (oryginał) ---
     try:
         sheet_name = "BOM_SingleOverview"
         if sheet_name in single_doc.Objects:
@@ -468,7 +455,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         else:
             sheet = single_doc.addObject("Spreadsheet::Sheet", sheet_name)
 
-        # headers A1..I2
         try:
             sheet.set("A1", "LIST OF SINGLE ELEMENTS")
             sheet.set("A2","ITEM")
@@ -483,7 +469,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
-        # try to merge A1:I1 (several API variants)
         try:
             try:
                 sheet.mergeCells("A1:I1")
@@ -522,7 +507,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
             total_weight += waga_total
             row += 1
 
-        # summary
         try:
             sheet.set(f"H{row}", "TOTAL WEIGHT [kg]")
             sheet.set(f"I{row}", f"{total_weight:.3f}")
@@ -532,7 +516,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         try: single_doc.recompute()
         except Exception: pass
 
-        # determine last row with data (we will include summary row in table range)
         last_row = 2
         try:
             r = 3
@@ -545,11 +528,9 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
-        # include summary row -> cell_end = I{last_row + 1}
         cell_start = "A1"
         cell_end = f"I{last_row + 1}"
 
-        # --- Ustaw szerokości kolumn na arkuszu PRZED dodaniem widoku tabeli ---
         try:
             apply_fixed_column_widths_to_sheet(sheet, DEFAULT_COLUMN_WIDTH, cell_start, cell_end)
             try: single_doc.recompute()
@@ -578,7 +559,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         except Exception:
             pass
 
-        # initial size (will be overridden by computed size)
         try:
             table_view.Width = 160.0
             table_view.Height = 90.0
@@ -592,7 +572,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         try: single_doc.recompute()
         except Exception: pass
 
-        # compute table size based on filled cells (ensure we used last_row+1 above)
         def sheet_filled_size(sheet):
             max_col = 0; max_row = 0
             cols = [chr(c) for c in range(ord('A'), ord('Z')+1)]
@@ -620,7 +599,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         table_w_mm = filled_cols * col_width_mm
         margin_base = 30.0; safe_offset = 2.0
 
-        # LEFT-BOTTOM placement center (values to store)
         left_margin = margin_base
         bottom_margin = margin_base
         center_x = left_margin + safe_offset + (table_w_mm / 2.0)
@@ -675,7 +653,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
         try: single_doc.recompute()
         except Exception: pass
 
-        # verification log
         stored_x = stored_y = None
         try:
             vo2 = table_view.ViewObject
@@ -710,15 +687,13 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
     log(">>> Gotowe: Single overview (grupa wyśrodkowana) z tabelą utworzona.")
 
-    # --- DODATEK: Dodajemy adnotacje X_CREATE_ANNOTATION.txt nad każdym widokiem ---
+    # --- DODATEK: Dodajemy adnotacje nad każdym widokiem (tylko zmiana pozycjonowania X/Y) ---
     try:
-        # pobierz arkusz (jeśli istnieje)
         try:
             sht = single_doc.getObject("BOM_SingleOverview")
         except Exception:
             sht = None
 
-        # helper: znajdź wiersz dla pref w arkuszu (kolumna A == pref)
         def find_row_for_pref(pref):
             if not sht: return None
             try:
@@ -738,7 +713,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 if not hasattr(v, "TypeId"): continue
                 if not str(getattr(v, "TypeId", "")).startswith("TechDraw::DrawViewPart"): continue
 
-                # ekstrakcja pref z nazwy obiektu "View_<pref>" lub "ViewXZ_<pref>"
                 m = re.search(r"(\d{3,4})", v.Name)
                 if m:
                     pref = m.group(1)
@@ -747,7 +721,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                     if not pref:
                         continue
 
-                # znajdź wiersz w arkuszu
                 row = find_row_for_pref(pref)
                 if row:
                     num_text = str(sht.get(f"A{row}")) or str(pref)
@@ -764,7 +737,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
                 scale_text = scale_str if 'scale_str' in locals() else ""
 
-                # pozycja widoku (centrum ramki)
                 try:
                     vx = float(getattr(v, "X", getattr(getattr(v, "ViewObject", None), "X", 0.0)))
                     vy = float(getattr(v, "Y", getattr(getattr(v, "ViewObject", None), "Y", 0.0)))
@@ -772,7 +744,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                     vx = float(getattr(v, "X", 0.0))
                     vy = float(getattr(v, "Y", 0.0))
 
-                # wysokość i szerokość widoku (fallback na view_size jeśli nie dostępne)
                 try:
                     vheight = float(getattr(v, "Height", getattr(getattr(v, "ViewObject", None), "Height", view_size)))
                 except Exception:
@@ -782,10 +753,8 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 except Exception:
                     vwidth = view_size
 
-                # oblicz pozycję etykiety — nad środkiem ramki, przesunięcie w lewo od lewej krawędzi
                 label_center_y = vy + (vheight / 2.0) + 6.0
-                left_edge_x = vx - (vwidth / 2.0)
-                label_center_x = left_edge_x + 6.0
+                # label_center_x było używane wcześniej — teraz nie, bo pozycjonujemy grupowo względem vx
 
                 # === Anno: numer (w ramce) ===
                 anno_num = single_doc.addObject('TechDraw::DrawRichAnno', f"Anno_Number_{pref}")
@@ -801,11 +770,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 </body>
 </html>""" % (num_text)
                 anno_num.ShowFrame = True
-                try:
-                    anno_num.X = float(label_center_x)
-                    anno_num.Y = float(label_center_y)
-                except Exception:
-                    pass
 
                 # === Anno: qty + scale (bez ramki) ===
                 anno_info = single_doc.addObject('TechDraw::DrawRichAnno', f"Anno_Info_{pref}")
@@ -822,20 +786,32 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 </body>
 </html>""" % (qty_text, scale_text)
                 anno_info.ShowFrame = False
+
+                # --- JEDYNA ZMIANA: wyśrodkowanie pary etykiet jako grupy względem środka widoku (vx) ---
                 try:
-                    # ustawiamy względnie: po lewej od numeru
-                    if hasattr(anno_num, "X") and hasattr(anno_num, "Y"):
-                        try:
-                            anno_info.X = float(anno_num.X) - 25.0
-                            anno_info.Y = float(anno_num.Y)
-                        except Exception:
-                            anno_info.X = float(label_center_x - 25.0)
-                            anno_info.Y = float(label_center_y)
-                    else:
-                        anno_info.X = float(label_center_x - 25.0)
-                        anno_info.Y = float(label_center_y)
+                    num_w = 25.0
+                    info_w = 25.0
+                    gap   = 1.0
+
+                    group_width = num_w + gap + info_w
+                    group_left = vx - group_width/2.0
+
+                    # najpierw INFO po lewej
+                    anno_info.X = float(group_left + info_w/2.0)
+                    anno_info.Y = float(label_center_y)
+
+                    # potem NUMBER po prawej
+                    anno_num.X  = float(group_left + info_w + gap + num_w/2.0)
+                    anno_num.Y  = float(label_center_y)
                 except Exception:
-                    pass
+                    # bezpieczny fallback: stary układ, gdyby powyższe się nie powiodło
+                    try:
+                        anno_num.X = float(vx)
+                        anno_num.Y = float(label_center_y)
+                        anno_info.X = float(vx - 25.0)
+                        anno_info.Y = float(label_center_y)
+                    except Exception:
+                        pass
 
                 try:
                     single_doc.recompute()
