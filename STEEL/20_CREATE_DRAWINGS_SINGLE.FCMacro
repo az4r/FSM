@@ -1,5 +1,8 @@
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
-# Oryginalne makro z repozytorium + JEDNA zmiana: wyśrodkowanie pary etykiet (Anno_Number_... + Anno_Info_...) jako grupy nad widokiem
+# Minimalne poprawki:
+# 1) Etykiety (Anno_Info_..., Anno_Number_...) dodawane na właściwą stronę każdego widoku (nie na ostatnią),
+# 2) Tabela tworzona per-strona i zawiera wyłącznie elementy z tej strony; bez skanowania pustych komórek.
+
 import FreeCAD as App, os, re, json
 import a2p_importpart
 import TechDraw
@@ -9,11 +12,9 @@ from PySide2 import QtWidgets
 DEFAULT_COLUMN_WIDTH = 125   # szerokość kolumny w arkuszu (px)
 POSITION_COLUMN_WIDTH = 33   # szerokość kolumny używana do pozycjonowania tabeli (mm)
 
-# --- Logger ---
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
 
-# --- Helper: ustaw szerokości kolumn w arkuszu Spreadsheet ---
 def apply_fixed_column_widths_to_sheet(sheet, width_px, cell_start="A1", cell_end="I999"):
     try:
         width_px = int(width_px)
@@ -72,7 +73,6 @@ def select_template_and_scale():
     dlg.exec_()
     return tpl_combo.currentText(), scale_combo.currentText()
 
-# --- material/density dialogs ---
 apply_to_all_mat = False
 global_material = "S355J2"
 apply_to_all_dens = False
@@ -143,7 +143,6 @@ def ask_density(element_label, default=7850.0):
         return d
     return default
 
-# --- helpers ---
 def _get_dims_from_bbox(obj):
     try:
         if not hasattr(obj, "Shape") or obj.Shape is None or obj.Shape.isNull():
@@ -318,7 +317,7 @@ def set_view_position_via_viewobject(view, x, y):
         except Exception:
             return False
 
-# --- Główna funkcja tworząca stronę, widoki i tabelę ---
+# --- Główna funkcja tworząca stronę, widoki i per-strona tabelę + etykiety ---
 def create_single_overview_grid_centered_with_table(main_doc, single_doc, template_name, scale_str, single_data):
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     tpl_path = os.path.join(tpl_dir, template_name)
@@ -331,7 +330,7 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         scale_val = 1.0
 
-    # --- Grid placement (oryginał) ---
+    # Grid
     max_element_mm = 6000.0
     view_size = max_element_mm * scale_val
     margin = 15.0
@@ -375,6 +374,8 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
     created_views = []
     created_prefs = []
+    # Zbiór prefiksów per-strona (do tabel)
+    page_to_prefs = {}
 
     for pref in items:
         src = None
@@ -421,8 +422,11 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                     pass
             try: view.recompute()
             except Exception: pass
+
             created_views.append(view)
             created_prefs.append(pref)
+            page_to_prefs.setdefault(current_page, []).append(pref)
+
             log(f">>> View_{pref} page={page_index} col={col} row={row} cx={cx:.2f} cy={cy:.2f}")
         except Exception as e:
             log(f"[WARN] Nie udało się utworzyć widoku dla {pref}: {e}")
@@ -435,284 +439,162 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         pass
 
-    log(f">>> Utworzono {len(created_views)} widoków na {page_index+1} stronach (bez centrowania, bez linii).")
+    log(f">>> Utworzono {len(created_views)} widoków na {page_index+1} stronach.")
 
-    # --- create spreadsheet and table (oryginał) ---
+    # Tabele per-strona: tylko elementy obecne na danej stronie; bez skanowania pustych komórek
     try:
-        sheet_name = "BOM_SingleOverview"
-        if sheet_name in single_doc.Objects:
-            sheet = single_doc.getObject(sheet_name)
+        for page_obj, prefs_on_page in page_to_prefs.items():
             try:
-                max_rows = 500
-                cols = ['A','B','C','D','E','F','G','H','I']
-                for r in range(1, max_rows+1):
-                    for c in cols:
-                        try: sheet.set(f"{c}{r}", "")
-                        except Exception: pass
-            except Exception:
-                try: sheet.clearAll()
-                except Exception: pass
-        else:
-            sheet = single_doc.addObject("Spreadsheet::Sheet", sheet_name)
+                sheet_name = f"BOM_{page_obj.Name}"
+                sheet = single_doc.addObject("Spreadsheet::Sheet", sheet_name)
 
-        try:
-            sheet.set("A1", "LIST OF SINGLE ELEMENTS")
-            sheet.set("A2","ITEM")
-            sheet.set("B2","NAME")
-            sheet.set("C2","QUANTITY (pcs.)")
-            sheet.set("D2","LENGHT [mm]")
-            sheet.set("E2","WIDTH [mm]")
-            sheet.set("F2","HEIGHT [mm]")
-            sheet.set("G2","MATERIAL")
-            sheet.set("H2","WEIGHT OF 1 pcs. [kg]")
-            sheet.set("I2","WEIGHT [kg]")
-        except Exception:
-            pass
+                # nagłówki
+                sheet.set("A1", "LIST OF SINGLE ELEMENTS")
+                sheet.set("A2","ITEM")
+                sheet.set("B2","NAME")
+                sheet.set("C2","QUANTITY (pcs.)")
+                sheet.set("D2","LENGHT [mm]")
+                sheet.set("E2","WIDTH [mm]")
+                sheet.set("F2","HEIGHT [mm]")
+                sheet.set("G2","MATERIAL")
+                sheet.set("H2","WEIGHT OF 1 pcs. [kg]")
+                sheet.set("I2","WEIGHT [kg]")
 
-        try:
-            try:
-                sheet.mergeCells("A1:I1")
-            except Exception:
-                if hasattr(sheet, "mergeRange"):
-                    sheet.mergeRange("A1", "I1")
-                elif hasattr(sheet, "setMergedCells"):
-                    sheet.setMergedCells(["A1:I1"])
-        except Exception as e:
-            log(f"[DEBUG] merge header failed: {e}")
-
-        row = 3
-        total_weight = 0.0
-        for pref in sorted(created_prefs):
-            data = single_data.get(pref, {})
-            element_label = pref
-            material = ask_material(element_label, "S355J2")
-            density = ask_density(element_label, 7850.0)
-            vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
-            waga_elem = vol_m3 * density
-            waga_total = waga_elem * data.get("ilosc",0)
-
-            try:
-                sheet.set(f"A{row}", pref)
-                sheet.set(f"B{row}", data.get("nazwa","?"))
-                sheet.set(f"C{row}", str(data.get("ilosc",0)))
-                sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
-                sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
-                sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
-                sheet.set(f"G{row}", material)
-                sheet.set(f"H{row}", f"{waga_elem:.3f}")
-                sheet.set(f"I{row}", f"{waga_total:.3f}")
-            except Exception as e:
-                log(f"[DEBUG] Błąd przy wstawianiu wiersza {row} do {sheet_name}: {e}")
-
-            total_weight += waga_total
-            row += 1
-
-        try:
-            sheet.set(f"H{row}", "TOTAL WEIGHT [kg]")
-            sheet.set(f"I{row}", f"{total_weight:.3f}")
-        except Exception:
-            pass
-
-        try: single_doc.recompute()
-        except Exception: pass
-
-        last_row = 2
-        try:
-            r = 3
-            while True:
-                val = sheet.get(f"A{r}")
-                if val is None or str(val).strip() == "":
-                    break
-                last_row = r
-                r += 1
-        except Exception:
-            pass
-
-        cell_start = "A1"
-        cell_end = f"I{last_row + 1}"
-
-        try:
-            apply_fixed_column_widths_to_sheet(sheet, DEFAULT_COLUMN_WIDTH, cell_start, cell_end)
-            try: single_doc.recompute()
-            except Exception: pass
-        except Exception:
-            pass
-
-        table_view = single_doc.addObject("TechDraw::DrawViewSpreadsheet", "Table_SingleOverview")
-        table_view.Source = sheet
-        try:
-            table_view.CellStart = cell_start
-            table_view.CellEnd = cell_end
-        except Exception:
-            try:
-                vo = table_view.ViewObject
-                if hasattr(vo, "CellStart"): vo.CellStart = cell_start
-                if hasattr(vo, "CellEnd"): vo.CellEnd = cell_end
-            except Exception:
-                pass
-
-        try:
-            vo = table_view.ViewObject
-            if hasattr(vo, "FontSize"): vo.FontSize = 10
-            if hasattr(vo, "RowHeight"): vo.RowHeight = 6
-            vo.Visibility = True
-        except Exception:
-            pass
-
-        try:
-            table_view.Width = 160.0
-            table_view.Height = 90.0
-        except Exception:
-            pass
-
-        page.addView(table_view)
-
-        try: table_view.recompute()
-        except Exception: pass
-        try: single_doc.recompute()
-        except Exception: pass
-
-        def sheet_filled_size(sheet):
-            max_col = 0; max_row = 0
-            cols = [chr(c) for c in range(ord('A'), ord('Z')+1)]
-            for c_idx, c in enumerate(cols, start=1):
-                found_in_col = False
-                for r in range(1, 2000):
-                    try:
-                        val = sheet.get(f"{c}{r}")
-                    except Exception:
-                        val = None
-                    if val is not None and str(val).strip() != "":
-                        found_in_col = True
-                        if r > max_row: max_row = r
-                if found_in_col: max_col = c_idx
-            if max_col == 0 and max_row == 0: return 1,1
-            if max_row < 2: max_row = 2
-            return max_row, max_col
-
-        filled_rows, filled_cols = sheet_filled_size(sheet)
-        if filled_rows < (last_row + 1):
-            filled_rows = last_row + 1
-
-        row_height_mm = 6.0; col_width_mm = POSITION_COLUMN_WIDTH
-        table_h_mm = filled_rows * row_height_mm
-        table_w_mm = filled_cols * col_width_mm
-        margin_base = 30.0; safe_offset = 2.0
-
-        left_margin = margin_base
-        bottom_margin = margin_base
-        center_x = left_margin + safe_offset + (table_w_mm / 2.0)
-        center_y = bottom_margin + safe_offset + (table_h_mm / 2.0)
-
-        pos_x = float(center_x)
-        pos_y = float(center_y)
-
-        try:
-            vo = table_view.ViewObject
-        except Exception:
-            vo = None
-
-        if vo is not None:
-            try:
-                if hasattr(vo, "X"): vo.X = pos_x
-                if hasattr(vo, "Y"): vo.Y = pos_y
-                try: vo.update()
-                except Exception: pass
-            except Exception:
-                pass
-
-        try:
-            table_view.X = pos_x
-            table_view.Y = pos_y
-        except Exception:
-            pass
-
-        try:
-            pl = getattr(table_view, "Placement", None)
-            if pl is not None:
                 try:
-                    pl.Base.x = pos_x
-                    pl.Base.y = pos_y
-                    table_view.Placement = pl
+                    sheet.mergeCells("A1:I1")
                 except Exception:
                     try:
-                        table_view.Placement = App.Placement(App.Vector(pos_x, pos_y, 0), App.Rotation())
+                        if hasattr(sheet, "mergeRange"):
+                            sheet.mergeRange("A1","I1")
+                        elif hasattr(sheet, "setMergedCells"):
+                            sheet.setMergedCells(["A1:I1"])
                     except Exception:
                         pass
-        except Exception:
-            pass
 
-        try:
-            table_view.Width = table_w_mm
-            table_view.Height = table_h_mm
-        except Exception:
-            pass
+                row = 3
+                total_weight = 0.0
+                for pref in sorted(prefs_on_page):
+                    data = single_data.get(pref, {})
+                    material = ask_material(pref, "S355J2")
+                    density = ask_density(pref, 7850.0)
+                    vol_m3 = (data.get("dlugosc",0.0) * data.get("szer",0.0) * data.get("wys",0.0)) / 1e9
+                    waga_elem = vol_m3 * density
+                    waga_total = waga_elem * data.get("ilosc",0)
 
-        try: table_view.recompute()
-        except Exception: pass
-        try: single_doc.recompute()
-        except Exception: pass
+                    sheet.set(f"A{row}", pref)
+                    sheet.set(f"B{row}", data.get("nazwa","?"))
+                    sheet.set(f"C{row}", str(data.get("ilosc",0)))
+                    sheet.set(f"D{row}", f"{data.get('dlugosc',0.0):.2f}")
+                    sheet.set(f"E{row}", f"{data.get('szer',0.0):.2f}")
+                    sheet.set(f"F{row}", f"{data.get('wys',0.0):.2f}")
+                    sheet.set(f"G{row}", material)
+                    sheet.set(f"H{row}", f"{waga_elem:.3f}")
+                    sheet.set(f"I{row}", f"{waga_total:.3f}")
 
-        stored_x = stored_y = None
-        try:
-            vo2 = table_view.ViewObject
-            if hasattr(vo2, "X"): stored_x = float(vo2.X)
-            if hasattr(vo2, "Y"): stored_y = float(vo2.Y)
-        except Exception:
-            pass
-        if stored_x is None or stored_y is None:
-            try:
-                pl2 = getattr(table_view, "Placement", None)
-                if pl2 is not None:
-                    stored_x = float(pl2.Base.x); stored_y = float(pl2.Base.y)
-            except Exception:
-                pass
-        if stored_x is None or stored_y is None:
-            try:
-                stored_x = float(getattr(table_view, "X", None))
-                stored_y = float(getattr(table_view, "Y", None))
-            except Exception:
-                pass
+                    total_weight += waga_total
+                    row += 1
 
-        log(f"[TABLE] Dodano tabelę {sheet.Name} zakres={cell_start}:{cell_end} pos(desired)={pos_x:.2f},{pos_y:.2f} stored={stored_x},{stored_y} size={table_w_mm:.2f}x{table_h_mm:.2f} filled_r={filled_rows} filled_c={filled_cols}")
+                summary_row = row if row > 3 else 3
+                sheet.set(f"H{summary_row}", "TOTAL WEIGHT [kg]")
+                sheet.set(f"I{summary_row}", f"{total_weight:.3f}")
 
+                try: single_doc.recompute()
+                except Exception: pass
+
+                cell_start = "A1"
+                cell_end = f"I{summary_row}"
+
+                try:
+                    apply_fixed_column_widths_to_sheet(sheet, DEFAULT_COLUMN_WIDTH, cell_start, cell_end)
+                    try: single_doc.recompute()
+                    except Exception: pass
+                except Exception:
+                    pass
+
+                table_view = single_doc.addObject("TechDraw::DrawViewSpreadsheet", f"Table_{page_obj.Name}")
+                table_view.Source = sheet
+                try:
+                    table_view.CellStart = cell_start
+                    table_view.CellEnd = cell_end
+                except Exception:
+                    try:
+                        vo = table_view.ViewObject
+                        if hasattr(vo, "CellStart"): vo.CellStart = cell_start
+                        if hasattr(vo, "CellEnd"): vo.CellEnd = cell_end
+                    except Exception:
+                        pass
+
+                try:
+                    vo = table_view.ViewObject
+                    if hasattr(vo, "FontSize"): vo.FontSize = 10
+                    if hasattr(vo, "RowHeight"): vo.RowHeight = 6
+                    vo.Visibility = True
+                except Exception:
+                    pass
+
+                page_obj.addView(table_view)
+
+                filled_rows = summary_row
+                filled_cols = 9  # A..I
+                row_height_mm = 6.0
+                col_width_mm = POSITION_COLUMN_WIDTH
+                table_h_mm = filled_rows * row_height_mm
+                table_w_mm = filled_cols * col_width_mm
+
+                left_margin = 30.0
+                bottom_margin = 30.0
+                safe_offset = 2.0
+                center_x = left_margin + safe_offset + (table_w_mm / 2.0)
+                center_y = bottom_margin + safe_offset + (table_h_mm / 2.0)
+
+                try:
+                    vo = table_view.ViewObject
+                    if hasattr(vo, "X"): vo.X = float(center_x)
+                    if hasattr(vo, "Y"): vo.Y = float(center_y)
+                    try: vo.update()
+                    except Exception: pass
+                except Exception:
+                    pass
+
+                try:
+                    table_view.X = float(center_x)
+                    table_view.Y = float(center_y)
+                except Exception:
+                    pass
+
+                try:
+                    table_view.Width = table_w_mm
+                    table_view.Height = table_h_mm
+                except Exception:
+                    pass
+
+                try: table_view.recompute()
+                except Exception: pass
+                try: single_doc.recompute()
+                except Exception: pass
+
+                log(f"[TABLE] {sheet.Name} zakres={cell_start}:{cell_end} size={table_w_mm:.2f}x{table_h_mm:.2f}")
+            except Exception as e:
+                log(f"[TABLE] Błąd przy tworzeniu tabeli dla strony {getattr(page_obj,'Name',str(page_obj))}: {e}")
     except Exception as e:
-        log(f"[TABLE] Błąd podczas tworzenia/pozycjonowania tabeli: {e}")
+        log(f"[TABLE] Błąd globalny: {e}")
 
+    # Etykiety per widok: na właściwej stronie; grupa wyśrodkowana (Info po lewej, Number po prawej)
     try:
-        single_doc.recompute()
-        single_doc.save()
-    except Exception:
-        pass
-
-    log(">>> Gotowe: Single overview (grupa wyśrodkowana) z tabelą utworzona.")
-
-    # --- DODATEK: Dodajemy adnotacje nad każdym widokiem (tylko zmiana pozycjonowania X/Y) ---
-    try:
-        try:
-            sht = single_doc.getObject("BOM_SingleOverview")
-        except Exception:
-            sht = None
-
-        def find_row_for_pref(pref):
-            if not sht: return None
-            try:
-                r = 3
-                while True:
-                    v = sht.get(f"A{r}")
-                    if v is None or str(v).strip() == "":
-                        return None
-                    if str(v).strip() == str(pref):
-                        return r
-                    r += 1
-            except Exception:
-                return None
-
         for v in created_views:
             try:
                 if not hasattr(v, "TypeId"): continue
                 if not str(getattr(v, "TypeId", "")).startswith("TechDraw::DrawViewPart"): continue
 
+                # strona dla widoku (najpewniejsze przez rodziców)
+                try:
+                    page_for_view = next((p for p in v.InList if hasattr(p, "TypeId") and str(p.TypeId).startswith("TechDraw::DrawPage")), None)
+                except Exception:
+                    page_for_view = None
+                if page_for_view is None:
+                    page_for_view = current_page
+
+                # pref
                 m = re.search(r"(\d{3,4})", v.Name)
                 if m:
                     pref = m.group(1)
@@ -721,60 +603,30 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                     if not pref:
                         continue
 
-                row = find_row_for_pref(pref)
-                if row:
-                    num_text = str(sht.get(f"A{row}")) or str(pref)
-                    qty_val = sht.get(f"C{row}")
-                else:
-                    num_text = str(pref)
-                    qty_val = 0
-
-                try:
-                    qty = int(float(qty_val)) if qty_val is not None else 0
-                except Exception:
-                    qty = 0
+                data = single_data.get(pref, {})
+                qty = int(float(data.get("ilosc", 0))) if data.get("ilosc", 0) else 0
                 qty_text = f"{qty}x"
-
+                num_text = str(pref)
                 scale_text = scale_str if 'scale_str' in locals() else ""
 
+                # pozycja widoku
                 try:
                     vx = float(getattr(v, "X", getattr(getattr(v, "ViewObject", None), "X", 0.0)))
                     vy = float(getattr(v, "Y", getattr(getattr(v, "ViewObject", None), "Y", 0.0)))
                 except Exception:
                     vx = float(getattr(v, "X", 0.0))
                     vy = float(getattr(v, "Y", 0.0))
-
                 try:
                     vheight = float(getattr(v, "Height", getattr(getattr(v, "ViewObject", None), "Height", view_size)))
                 except Exception:
                     vheight = view_size
-                try:
-                    vwidth = float(getattr(v, "Width", getattr(getattr(v, "ViewObject", None), "Width", view_size)))
-                except Exception:
-                    vwidth = view_size
 
                 label_center_y = vy + (vheight / 2.0) + 6.0
-                # label_center_x było używane wcześniej — teraz nie, bo pozycjonujemy grupowo względem vx
 
-                # === Anno: numer (w ramce) ===
-                anno_num = single_doc.addObject('TechDraw::DrawRichAnno', f"Anno_Number_{pref}")
-                try:
-                    current_page.addView(anno_num)
-                except Exception:
-                    pass
-                anno_num.AnnoText = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN" "http://www.w3.org/TR/REC-html40/strict.dtd">
-<html>
-<head><meta name="qrichtext" content="1" /></head>
-<body style="font-family:'Arial'; font-size:10pt; font-weight:normal; text-align:left;">
-<p style="margin:0px; text-align:left;">%s</p>
-</body>
-</html>""" % (num_text)
-                anno_num.ShowFrame = True
-
-                # === Anno: qty + scale (bez ramki) ===
+                # INFO po lewej
                 anno_info = single_doc.addObject('TechDraw::DrawRichAnno', f"Anno_Info_{pref}")
                 try:
-                    current_page.addView(anno_info)
+                    page_for_view.addView(anno_info)
                 except Exception:
                     pass
                 anno_info.AnnoText = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN" "http://www.w3.org/TR/REC-html40/strict.dtd">
@@ -787,24 +639,34 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 </html>""" % (qty_text, scale_text)
                 anno_info.ShowFrame = False
 
-                # --- JEDYNA ZMIANA: wyśrodkowanie pary etykiet jako grupy względem środka widoku (vx) ---
+                # NUMBER po prawej
+                anno_num = single_doc.addObject('TechDraw::DrawRichAnno', f"Anno_Number_{pref}")
                 try:
-                    num_w = 25.0
-                    info_w = 25.0
-                    gap   = 1.0
+                    page_for_view.addView(anno_num)
+                except Exception:
+                    pass
+                anno_num.AnnoText = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN" "http://www.w3.org/TR/REC-html40/strict.dtd">
+<html>
+<head><meta name="qrichtext" content="1" /></head>
+<body style="font-family:'Arial'; font-size:10pt; font-weight:normal; text-align:left;">
+<p style="margin:0px; text-align:left;">%s</p>
+</body>
+</html>""" % (num_text)
+                anno_num.ShowFrame = True
 
-                    group_width = num_w + gap + info_w
+                # Wyśrodkowanie grupy (Info po lewej, Number po prawej)
+                try:
+                    info_w = 25.0
+                    num_w  = 40.0
+                    gap    = 6.0
+                    group_width = info_w + gap + num_w
                     group_left = vx - group_width/2.0
 
-                    # najpierw INFO po lewej
                     anno_info.X = float(group_left + info_w/2.0)
                     anno_info.Y = float(label_center_y)
-
-                    # potem NUMBER po prawej
                     anno_num.X  = float(group_left + info_w + gap + num_w/2.0)
                     anno_num.Y  = float(label_center_y)
                 except Exception:
-                    # bezpieczny fallback: stary układ, gdyby powyższe się nie powiodło
                     try:
                         anno_num.X = float(vx)
                         anno_num.Y = float(label_center_y)
@@ -820,9 +682,8 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
             except Exception as e:
                 log(f"[ANNOT] Błąd podczas dodawania adnotacji dla widoku {getattr(v,'Name',str(v))}: {e}")
-
     except Exception as e:
-        log(f"[ANNOT] Błąd ogólny przy dodawaniu adnotacji: {e}")
+        log(f"[ANNOT] Błąd ogólny: {e}")
 
 # ENTRYPOINT
 try:
@@ -832,7 +693,7 @@ try:
     draw_dir   = os.path.join(proj_dir, "DRAWINGS")
     os.makedirs(draw_dir, exist_ok=True)
 
-    log("=== START CREATE_DRAWINGS_SINGLE (with table + viewports logic) ===")
+    log("=== START CREATE_DRAWINGS_SINGLE ===")
 
     main_doc = choose_main_document(draw_dir, main_dir)
     if not main_doc:
@@ -852,7 +713,7 @@ try:
 
     create_single_overview_grid_centered_with_table(main_doc, single_doc, tpl, scale, single_data)
 
-    log("=== KONIEC CREATE_DRAWINGS_SINGLE (with table + viewports logic) ===")
+    log("=== KONIEC CREATE_DRAWINGS_SINGLE ===")
 
 except Exception as e:
     log(f"!!! FAIL: {e}")
