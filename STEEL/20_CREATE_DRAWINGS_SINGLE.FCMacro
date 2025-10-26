@@ -1,7 +1,8 @@
 # 20_CREATE_DRAWINGS_SINGLE.FCMacro
-# Minimalne poprawki:
-# 1) Etykiety (Anno_Info_..., Anno_Number_...) dodawane na właściwą stronę każdego widoku (nie na ostatnią),
-# 2) Tabela tworzona per-strona i zawiera wyłącznie elementy z tej strony; bez skanowania pustych komórek.
+# Minimalna zmiana: rozdzielony maksymalny rozmiar elementu na osie X i Y:
+# - max_element_x_mm kontroluje szerokość siatki (offset_x),
+# - max_element_y_mm kontroluje wysokość siatki (offset_y).
+# Reszta makra pozostaje bez zmian.
 
 import FreeCAD as App, os, re, json
 import a2p_importpart
@@ -330,13 +331,21 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     except Exception:
         scale_val = 1.0
 
-    # Grid
-    max_element_mm = 6000.0
-    view_size = max_element_mm * scale_val
+    # --- ZMIANA: niezależne max rozmiary w osiach X/Y ---
+    # Domyślne wartości - dostosuj według potrzeb projektu
+    max_element_x_mm = 3000.0   # maksymalna długość elementu w poziomie (mm)
+    max_element_y_mm = 6000.0   # maksymalna wysokość elementu w pionie (mm)
+
+    # Skalowane rozmiary widoku w mm
+    view_size_x = max_element_x_mm * scale_val
+    view_size_y = max_element_y_mm * scale_val
+
+    # marginesy i odstępy (mm)
     margin = 30.0
     gap = 10.0
-    offset_x = view_size + gap
-    offset_y = view_size + gap
+
+    offset_x = view_size_x + gap
+    offset_y = view_size_y + gap
 
     template_obj = single_doc.addObject('TechDraw::DrawSVGTemplate', "Template_SingleOverview")
     template_obj.Template = tpl_path
@@ -353,10 +362,10 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
     usable_h = ph - 2*margin
     cols_fit = max(1, int(usable_w // offset_x))
     rows_fit = max(1, int(usable_h // offset_y))
-    log(f"[GRID] page W={pw} H={ph} scale={scale_val} view_size={view_size:.2f} cols_fit={cols_fit} rows_fit={rows_fit}")
+    log(f"[GRID] page W={pw} H={ph} scale={scale_val} view_size_x={view_size_x:.2f} view_size_y={view_size_y:.2f} cols_fit={cols_fit} rows_fit={rows_fit}")
 
-    left_start = margin + view_size/2.0
-    top_start = ph - margin - view_size/2.0
+    left_start = margin + view_size_x/2.0
+    top_start = ph - margin - view_size_y/2.0
 
     items = sorted(single_data.keys())
     page_index = 0
@@ -374,7 +383,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
     created_views = []
     created_prefs = []
-    # Zbiór prefiksów per-strona (do tabel)
     page_to_prefs = {}
 
     for pref in items:
@@ -441,14 +449,13 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
 
     log(f">>> Utworzono {len(created_views)} widoków na {page_index+1} stronach.")
 
-    # Tabele per-strona: tylko elementy obecne na danej stronie; bez skanowania pustych komórek
+    # Tabele per-strona
     try:
         for page_obj, prefs_on_page in page_to_prefs.items():
             try:
                 sheet_name = f"BOM_{page_obj.Name}"
                 sheet = single_doc.addObject("Spreadsheet::Sheet", sheet_name)
 
-                # nagłówki
                 sheet.set("A1", "LIST OF SINGLE ELEMENTS")
                 sheet.set("A2","ITEM")
                 sheet.set("B2","NAME")
@@ -586,7 +593,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 if not hasattr(v, "TypeId"): continue
                 if not str(getattr(v, "TypeId", "")).startswith("TechDraw::DrawViewPart"): continue
 
-                # strona dla widoku (najpewniejsze przez rodziców)
                 try:
                     page_for_view = next((p for p in v.InList if hasattr(p, "TypeId") and str(p.TypeId).startswith("TechDraw::DrawPage")), None)
                 except Exception:
@@ -594,7 +600,6 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 if page_for_view is None:
                     page_for_view = current_page
 
-                # pref
                 m = re.search(r"(\d{3,4})", v.Name)
                 if m:
                     pref = m.group(1)
@@ -609,17 +614,18 @@ def create_single_overview_grid_centered_with_table(main_doc, single_doc, templa
                 num_text = str(pref)
                 scale_text = scale_str if 'scale_str' in locals() else ""
 
-                # pozycja widoku
                 try:
                     vx = float(getattr(v, "X", getattr(getattr(v, "ViewObject", None), "X", 0.0)))
                     vy = float(getattr(v, "Y", getattr(getattr(v, "ViewObject", None), "Y", 0.0)))
                 except Exception:
                     vx = float(getattr(v, "X", 0.0))
                     vy = float(getattr(v, "Y", 0.0))
+
                 try:
-                    vheight = float(getattr(v, "Height", getattr(getattr(v, "ViewObject", None), "Height", view_size)))
+                    # wysokość widoku - używamy view_size_y (skrocony widok w osi Y)
+                    vheight = float(getattr(v, "Height", getattr(getattr(v, "ViewObject", None), "Height", view_size_y)))
                 except Exception:
-                    vheight = view_size
+                    vheight = view_size_y
 
                 label_center_y = vy + (vheight / 2.0) + 6.0
 
