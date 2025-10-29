@@ -1,0 +1,115 @@
+import FreeCAD as App, TechDraw, os
+from PySide2 import QtWidgets
+
+def log(msg):
+    App.Console.PrintMessage(str(msg) + "\n")
+
+# --- lista dostępnych szablonów ---
+def list_templates():
+    tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    if not os.path.isdir(tpl_dir):
+        log(f"!!! Nie znaleziono katalogu Templates: {tpl_dir}")
+        return []
+    return [f for f in os.listdir(tpl_dir) if f.lower().endswith("svg")]
+
+# --- okienko wyboru skali i szablonu ---
+def select_template_and_scale():
+    files = list_templates()
+    if not files:
+        return None, None
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Ustawienia przekrojów TechDraw")
+    layout = QtWidgets.QVBoxLayout(dlg)
+
+    # Skala
+    scale_layout = QtWidgets.QHBoxLayout()
+    scale_label = QtWidgets.QLabel("Skala:")
+    scale_combo = QtWidgets.QComboBox()
+    scale_combo.addItems(["1:1", "1:10", "1:20", "1:50", "1:100"])
+    scale_layout.addWidget(scale_label)
+    scale_layout.addWidget(scale_combo)
+    layout.addLayout(scale_layout)
+
+    # Szablon
+    tpl_label = QtWidgets.QLabel("Szablon:")
+    tpl_combo = QtWidgets.QComboBox()
+    tpl_combo.addItems(files)
+    layout.addWidget(tpl_label)
+    layout.addWidget(tpl_combo)
+
+    btn_ok = QtWidgets.QPushButton("OK")
+    layout.addWidget(btn_ok)
+    btn_ok.clicked.connect(dlg.accept)
+    dlg.exec_()
+
+    return tpl_combo.currentText(), scale_combo.currentText()
+
+# --- główna logika ---
+doc = App.ActiveDocument
+if not doc:
+    log("Brak aktywnego dokumentu.")
+else:
+    grid = doc.getObject("Grid")
+    if not grid:
+        log("Nie znaleziono obiektu Grid.")
+    else:
+        tpl, scale_str = select_template_and_scale()
+        if not tpl or not scale_str:
+            log("Nie wybrano szablonu lub skali. Anuluję.")
+        else:
+            num, den = scale_str.split(":")
+            scale_val = float(num)/float(den)
+
+            cols = grid.Columns
+            rows = grid.Rows
+            col_sizes = grid.ColumnSize
+            row_sizes = grid.RowSize
+
+            log(f"Grid: {cols} kolumn, {rows} wierszy")
+
+            tpl_path = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates", tpl)
+
+            # --- Sekcje wzdłuż osi X (kolumny) ---
+            x_pos = 0.0
+            for i in range(cols+1):
+                page = doc.addObject('TechDraw::DrawPage', f"Section_X_{i}")
+                tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_X_{i}")
+                tpl_obj.Template = tpl_path
+                page.Template = tpl_obj
+
+                view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
+                view.Source = doc.Objects
+                view.Direction = (1,0,0)   # patrzymy wzdłuż osi X → przekrój Y-Z
+                view.ScaleType = "Custom"
+                view.Scale = scale_val
+                page.addView(view)
+                view.X = 150
+                view.Y = 150
+
+                log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos})")
+                if i < len(col_sizes):
+                    x_pos += col_sizes[i]
+
+            # --- Sekcje wzdłuż osi Y (wiersze) ---
+            y_pos = 0.0
+            for j in range(rows+1):
+                page = doc.addObject('TechDraw::DrawPage', f"Section_Y_{j}")
+                tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_Y_{j}")
+                tpl_obj.Template = tpl_path
+                page.Template = tpl_obj
+
+                view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
+                view.Source = doc.Objects
+                view.Direction = (0,1,0)   # patrzymy wzdłuż osi Y → przekrój X-Z
+                view.ScaleType = "Custom"
+                view.Scale = scale_val
+                page.addView(view)
+                view.X = 150
+                view.Y = 150
+
+                log(f"Utworzono przekrój w osi Y_{j} (pozycja {y_pos})")
+                if j < len(row_sizes):
+                    y_pos += row_sizes[j]
+
+            doc.recompute()
+            log("=== Utworzono przekroje dla wszystkich osi Grid ===")
