@@ -1,4 +1,5 @@
-import FreeCAD as App, TechDraw, os
+# -*- coding: utf-8 -*-
+import FreeCAD as App, TechDraw, os, re
 from PySide2 import QtWidgets
 
 def log(msg):
@@ -44,6 +45,54 @@ def select_template_and_scale():
 
     return tpl_combo.currentText(), scale_combo.currentText()
 
+# --- regex: 4-cyfrowy numer elementu na początku etykiety ---
+re_num = re.compile(r"^(\d{4})")
+
+def get_model_objects(doc):
+    """Zwraca listę obiektów 3D (mają Shape), bez obiektów TechDraw."""
+    out = []
+    for o in doc.Objects:
+        # pomijamy obiekty TechDraw i obiekty bez kształtu
+        if hasattr(o, "Shape") and o.Shape and not o.isDerivedFrom("TechDraw::DrawView"):
+            out.append(o)
+    return out
+
+def get_single_elements(objs):
+    """Zwraca (num, obj) dla elementów pojedynczych rozpoznanych po 4-cyfrowym prefiksie etykiety."""
+    singles = []
+    for o in objs:
+        label = getattr(o, "Label", "") or ""
+        m = re_num.match(label)
+        if m:
+            singles.append((m.group(1), o))
+    # opcjonalnie: unikatowe numery, bez duplikatów
+    # singles = list({num: (num, obj) for (num, obj) in singles}.values())
+    return singles
+
+def add_labels_list(page, view, singles):
+    """Dodaje pionową listę etykietek w ramkach obok widoku (po prawej stronie)."""
+    # bezpieczne konwersje z Quantity -> float
+    vx = float(view.X); vy = float(view.Y)
+    vW = float(getattr(view, "Width", 200.0))  # szerokość widoku w mm (TechDraw zwykle udostępnia)
+    # kolumna po prawej stronie widoku:
+    base_x = vx + vW/2.0 + 30.0
+    base_y = vy
+    offset = 0.0
+
+    for (num, _obj) in singles:
+        anno = App.ActiveDocument.addObject('TechDraw::DrawRichAnno', f"Anno_{num}_{page.Name}")
+        page.addView(anno)
+        anno.AnnoText = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN"
+<html><head><meta name="qrichtext" content="1" /></head>
+<body style="font-family:'Arial'; font-size:10pt; font-weight:bold; text-align:left;">
+<p style="margin:0px; text-align:left;">{num}</p></body></html>"""
+        anno.ShowFrame = True
+
+        # ustawienie etykiet w kolumnie (15 mm odstępu)
+        anno.X = base_x
+        anno.Y = base_y - offset
+        offset += 15.0
+
 # --- główna logika ---
 doc = App.ActiveDocument
 if not doc:
@@ -69,47 +118,65 @@ else:
 
             tpl_path = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates", tpl)
 
-            # --- Sekcje wzdłuż osi X (kolumny) ---
+            # zbuduj listę obiektów 3D będących źródłem rzutni
+            model_objs = get_model_objects(doc)
+            # wyznacz elementy pojedyncze (numery)
+            singles = get_single_elements(model_objs)
+
+            # --- Sekcje wzdłuż osi X ---
             x_pos = 0.0
             for i in range(cols+1):
-                page = doc.addObject('TechDraw::DrawPage', f"Section_X_{i}")
-                tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_X_{i}")
-                tpl_obj.Template = tpl_path
-                page.Template = tpl_obj
+                try:
+                    page = doc.addObject('TechDraw::DrawPage', f"Section_X_{i}")
+                    tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_X_{i}")
+                    tpl_obj.Template = tpl_path
+                    page.Template = tpl_obj
 
-                view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
-                view.Source = doc.Objects
-                view.Direction = (1,0,0)   # patrzymy wzdłuż osi X → przekrój Y-Z
-                view.ScaleType = "Custom"
-                view.Scale = scale_val
-                page.addView(view)
-                view.X = 150
-                view.Y = 150
+                    view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
+                    view.Source = model_objs
+                    view.Direction = (1,0,0)   # przekrój Y-Z
+                    view.ScaleType = "Custom"
+                    view.Scale = scale_val
+                    page.addView(view)
+                    view.X = 150.0
+                    view.Y = 150.0
 
-                log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos})")
-                if i < len(col_sizes):
-                    x_pos += col_sizes[i]
+                    # lista etykiet obok widoku
+                    add_labels_list(page, view, singles)
 
-            # --- Sekcje wzdłuż osi Y (wiersze) ---
+                    log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos})")
+                    if i < len(col_sizes):
+                        x_pos += col_sizes[i]
+                except Exception as e:
+                    log(f"X_{i}: błąd tworzenia strony: {e}")
+
+            # --- Sekcje wzdłuż osi Y ---
             y_pos = 0.0
             for j in range(rows+1):
-                page = doc.addObject('TechDraw::DrawPage', f"Section_Y_{j}")
-                tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_Y_{j}")
-                tpl_obj.Template = tpl_path
-                page.Template = tpl_obj
+                try:
+                    page = doc.addObject('TechDraw::DrawPage', f"Section_Y_{j}")
+                    tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_Y_{j}")
+                    tpl_obj.Template = tpl_path
+                    page.Template = tpl_obj
 
-                view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
-                view.Source = doc.Objects
-                view.Direction = (0,1,0)   # patrzymy wzdłuż osi Y → przekrój X-Z
-                view.ScaleType = "Custom"
-                view.Scale = scale_val
-                page.addView(view)
-                view.X = 150
-                view.Y = 150
+                    view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
+                    view.Source = model_objs
+                    view.Direction = (0,1,0)   # przekrój X-Z
+                    view.ScaleType = "Custom"
+                    view.Scale = scale_val
+                    page.addView(view)
+                    view.X = 150.0
+                    view.Y = 150.0
 
-                log(f"Utworzono przekrój w osi Y_{j} (pozycja {y_pos})")
-                if j < len(row_sizes):
-                    y_pos += row_sizes[j]
+                    # lista etykiet obok widoku
+                    add_labels_list(page, view, singles)
 
+                    log(f"Utworzono przekrój w osi Y_{j} (pozycja {y_pos})")
+                    if j < len(row_sizes):
+                        y_pos += row_sizes[j]
+                except Exception as e:
+                    log(f"Y_{j}: błąd tworzenia strony: {e}")
+
+            # końcowy recompute
             doc.recompute()
-            log("=== Utworzono przekroje dla wszystkich osi Grid ===")
+            log("=== Utworzono przekroje i listy etykiet dla wszystkich osi Grid ===")
