@@ -5,7 +5,6 @@ from PySide2 import QtWidgets
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
 
-# --- lista dostępnych szablonów ---
 def list_templates():
     tpl_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
     if not os.path.isdir(tpl_dir):
@@ -13,7 +12,6 @@ def list_templates():
         return []
     return [f for f in os.listdir(tpl_dir) if f.lower().endswith("svg")]
 
-# --- okienko wyboru skali i szablonu ---
 def select_template_and_scale():
     files = list_templates()
     if not files:
@@ -21,8 +19,6 @@ def select_template_and_scale():
     dlg = QtWidgets.QDialog()
     dlg.setWindowTitle("Ustawienia przekrojów TechDraw")
     layout = QtWidgets.QVBoxLayout(dlg)
-
-    # Skala  <-- tutaj zmiana: dodano "1:200"
     scale_layout = QtWidgets.QHBoxLayout()
     scale_label = QtWidgets.QLabel("Skala:")
     scale_combo = QtWidgets.QComboBox()
@@ -30,174 +26,156 @@ def select_template_and_scale():
     scale_layout.addWidget(scale_label)
     scale_layout.addWidget(scale_combo)
     layout.addLayout(scale_layout)
-
-    # Szablon
     tpl_label = QtWidgets.QLabel("Szablon:")
     tpl_combo = QtWidgets.QComboBox()
     tpl_combo.addItems(files)
     layout.addWidget(tpl_label)
     layout.addWidget(tpl_combo)
-
     btn_ok = QtWidgets.QPushButton("OK")
     layout.addWidget(btn_ok)
     btn_ok.clicked.connect(dlg.accept)
     dlg.exec_()
-
     return tpl_combo.currentText(), scale_combo.currentText()
 
-# --- regex: 4-cyfrowy numer elementu na początku etykiety ---
 re_num = re.compile(r"^(\d{4})")
 
 def get_model_objects(doc):
-    """Zwraca listę obiektów 3D (mają Shape), bez obiektów TechDraw."""
-    out = []
-    for o in doc.Objects:
-        if hasattr(o, "Shape") and o.Shape and not o.isDerivedFrom("TechDraw::DrawView"):
-            out.append(o)
-    return out
+    return [o for o in doc.Objects if hasattr(o,"Shape") and o.Shape and not o.isDerivedFrom("TechDraw::DrawView")]
 
 def get_single_elements(objs):
-    """Zwraca (num, obj) dla elementów pojedynczych rozpoznanych po 4-cyfrowym prefiksie etykiety."""
     singles = []
     for o in objs:
-        label = getattr(o, "Label", "") or ""
+        label = getattr(o,"Label","") or ""
         m = re_num.match(label)
-        if m:
-            singles.append((m.group(1), o))
+        if m: singles.append((m.group(1),o))
     return singles
 
 def add_labels_list(page, view, singles):
-    """Dodaje pionową listę etykietek w ramkach obok widoku (po prawej stronie)."""
     vx = float(view.X); vy = float(view.Y)
-    vW = float(getattr(view, "Width", 200.0))
+    vW = float(getattr(view,"Width",200.0))
     base_x = vx + vW/2.0 + 30.0
     base_y = vy
     offset = 0.0
-
-    for (num, _obj) in singles:
+    for (num,_obj) in singles:
         anno = App.ActiveDocument.addObject('TechDraw::DrawRichAnno', f"Anno_{num}_{page.Name}")
         page.addView(anno)
-        anno.AnnoText = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN"
-<html><head><meta name="qrichtext" content="1" /></head>
-<body style="font-family:'Arial'; font-size:10pt; font-weight:bold; text-align:left;">
-<p style="margin:0px; text-align:left;">{num}</p></body></html>"""
+        anno.AnnoText = f"""<!DOCTYPE HTML><html><body style="font-family:'Arial'; font-size:10pt; font-weight:bold;"><p>{num}</p></body></html>"""
         anno.ShowFrame = True
         anno.X = base_x
         anno.Y = base_y - offset
         offset += 15.0
 
 def objects_crossing_plane_X(objs, x_pos, eps=1e-6):
-    """Zwraca obiekty, których BoundingBox w osi X przecina pozycję x_pos."""
-    res = []
+    res=[]
     for o in objs:
-        bb = o.Shape.BoundBox
-        if bb.XMin - eps <= x_pos <= bb.XMax + eps:
+        bb=o.Shape.BoundBox
+        if bb.XMin-eps <= x_pos <= bb.XMax+eps:
             res.append(o)
     return res
 
 def objects_crossing_plane_Y(objs, y_pos, eps=1e-6):
-    """Zwraca obiekty, których BoundingBox w osi Y przecina pozycję y_pos."""
-    res = []
+    res=[]
     for o in objs:
-        bb = o.Shape.BoundBox
-        if bb.YMin - eps <= y_pos <= bb.YMax + eps:
+        bb=o.Shape.BoundBox
+        if bb.YMin-eps <= y_pos <= bb.YMax+eps:
             res.append(o)
     return res
 
+def objects_in_x_range_by_center(objs,xmin,xmax,eps=1e-6):
+    res=[]
+    for o in objs:
+        try:
+            cx=float(o.Shape.BoundBox.Center.x)
+            if xmin-eps<=cx<=xmax+eps: res.append(o)
+        except: continue
+    return res
+
+def objects_in_y_range_by_center(objs,ymin,ymax,eps=1e-6):
+    res=[]
+    for o in objs:
+        try:
+            cy=float(o.Shape.BoundBox.Center.y)
+            if ymin-eps<=cy<=ymax+eps: res.append(o)
+        except: continue
+    return res
+
 # --- główna logika ---
-doc = App.ActiveDocument
+doc=App.ActiveDocument
 if not doc:
     log("Brak aktywnego dokumentu.")
 else:
-    grid = doc.getObject("Grid")
+    grid=doc.getObject("Grid")
     if not grid:
         log("Nie znaleziono obiektu Grid.")
     else:
-        tpl, scale_str = select_template_and_scale()
+        tpl,scale_str=select_template_and_scale()
         if not tpl or not scale_str:
             log("Nie wybrano szablonu lub skali. Anuluję.")
         else:
-            num, den = scale_str.split(":")
-            scale_val = float(num)/float(den)
-
-            cols = grid.Columns
-            rows = grid.Rows
-            col_sizes = list(grid.ColumnSize)
-            row_sizes = list(grid.RowSize)
-
+            num,den=scale_str.split(":")
+            scale_val=float(num)/float(den)
+            cols=int(grid.Columns); rows=int(grid.Rows)
+            col_sizes=[float(x) for x in list(grid.ColumnSize)]
+            row_sizes=[float(y) for y in list(grid.RowSize)]
             log(f"Grid: {cols} kolumn, {rows} wierszy")
+            tpl_path=os.path.join(App.getResourceDir(),"Mod","TechDraw","Templates",tpl)
+            model_objs_all=get_model_objects(doc)
 
-            tpl_path = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates", tpl)
-
-            # pobierz wszystkie obiekty modelowe (3D)
-            model_objs_all = get_model_objects(doc)
-
-            # --- Sekcje wzdłuż osi X ---
-            x_pos = 0.0
+            # --- X ---
+            x_pos=0.0
             for i in range(cols+1):
                 try:
-                    page = doc.addObject('TechDraw::DrawPage', f"Section_X_{i}")
-                    tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_X_{i}")
-                    tpl_obj.Template = tpl_path
-                    page.Template = tpl_obj
+                    page=doc.addObject('TechDraw::DrawPage',f"Section_X_{i}")
+                    tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_X_{i}")
+                    tpl_obj.Template=tpl_path; page.Template=tpl_obj
 
-                    model_objs = objects_crossing_plane_X(model_objs_all, x_pos)
+                    half_next=0.5*abs(col_sizes[i]) if i<cols else 0.0
+                    xmin=x_pos; xmax=x_pos+half_next
 
-                    view = None
+                    objs_plane = objects_crossing_plane_X(model_objs_all, x_pos)
+                    objs_range = objects_in_x_range_by_center(model_objs_all, xmin, xmax)
+                    model_objs = list(set(objs_plane + objs_range))
+
+                    log(f"X_{i}: plane={x_pos}, range=[{xmin},{xmax}], found {len(model_objs)} objects")
+
                     if model_objs:
-                        view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
-                        view.Source = model_objs
-                        view.Direction = (1,0,0)   # przekrój Y-Z
-                        view.ScaleType = "Custom"
-                        view.Scale = scale_val
-                        page.addView(view)
-                        view.X = 150.0
-                        view.Y = 150.0
+                        view=doc.addObject('TechDraw::DrawViewPart',f"View_X_{i}")
+                        view.Source=model_objs; view.Direction=(1,0,0)
+                        view.ScaleType="Custom"; view.Scale=scale_val
+                        page.addView(view); view.X=150.0; view.Y=150.0
+                        singles_visible=get_single_elements(model_objs)
+                        add_labels_list(page,view,singles_visible)
 
-                        singles_visible = get_single_elements(model_objs)
-                        add_labels_list(page, view, singles_visible)
-                    else:
-                        log(f"X_{i}: brak obiektów przecinających X={x_pos}, pomijam widok.")
+                    if i<len(col_sizes): x_pos+=abs(col_sizes[i])
+                except Exception as e: log(f"X_{i}: błąd {e}")
 
-                    log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos}), obiektów widocznych: {len(model_objs)}")
-                    if i < len(col_sizes):
-                        x_pos += col_sizes[i]
-                except Exception as e:
-                    log(f"X_{i}: błąd tworzenia strony: {e}")
-
-            # --- Sekcje wzdłuż osi Y (kierunek patrzenia odwrócony) ---
-            y_pos = 0.0
+            # --- Y ---
+            y_pos=0.0
             for j in range(rows+1):
                 try:
-                    page = doc.addObject('TechDraw::DrawPage', f"Section_Y_{j}")
-                    tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', f"Template_Y_{j}")
-                    tpl_obj.Template = tpl_path
-                    page.Template = tpl_obj
+                    page=doc.addObject('TechDraw::DrawPage',f"Section_Y_{j}")
+                    tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_Y_{j}")
+                    tpl_obj.Template=tpl_path; page.Template=tpl_obj
 
-                    # odwracamy znak y_pos, bo Grid Y działa w ujemnych wartościach w Twoim modelu
-                    model_objs = objects_crossing_plane_Y(model_objs_all, -y_pos)
+                    half_next=0.5*abs(row_sizes[j]) if j<rows else 0.0
+                    ymin_model=y_pos; ymax_model=y_pos+half_next
 
-                    view = None
+                    objs_plane = objects_crossing_plane_Y(model_objs_all, y_pos)
+                    objs_range = objects_in_y_range_by_center(model_objs_all, ymin_model, ymax_model)
+                    model_objs = list(set(objs_plane + objs_range))
+
+                    log(f"Y_{j}: plane={y_pos}, range=[{ymin_model},{ymax_model}], found {len(model_objs)} objects")
+
                     if model_objs:
-                        view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
-                        view.Source = model_objs
-                        view.Direction = (0,-1,0)   # PRZECIWNA orientacja względem osi Y
-                        view.ScaleType = "Custom"
-                        view.Scale = scale_val
-                        page.addView(view)
-                        view.X = 150.0
-                        view.Y = 150.0
+                        view=doc.addObject('TechDraw::DrawViewPart',f"View_Y_{j}")
+                        view.Source=model_objs; view.Direction=(0,-1,0)
+                        view.ScaleType="Custom"; view.Scale=scale_val
+                        page.addView(view); view.X=150.0; view.Y=150.0
+                        singles_visible=get_single_elements(model_objs)
+                        add_labels_list(page,view,singles_visible)
 
-                        singles_visible = get_single_elements(model_objs)
-                        add_labels_list(page, view, singles_visible)
-                    else:
-                        log(f"Y_{j}: brak obiektów przecinających Y={-y_pos}, pomijam widok.")
-
-                    log(f"Utworzono przekrój w osi Y_{j} (pozycja {-y_pos}), obiektów widocznych: {len(model_objs)}")
-                    if j < len(row_sizes):
-                        y_pos += row_sizes[j]
-                except Exception as e:
-                    log(f"Y_{j}: błąd tworzenia strony: {e}")
+                    if j<len(row_sizes): y_pos+=abs(row_sizes[j])
+                except Exception as e: log(f"Y_{j}: błąd {e}")
 
             doc.recompute()
             log("=== Utworzono przekroje i listy etykiet dla wszystkich osi Grid ===")
