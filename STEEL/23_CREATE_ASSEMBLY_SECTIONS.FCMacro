@@ -22,11 +22,11 @@ def select_template_and_scale():
     dlg.setWindowTitle("Ustawienia przekrojów TechDraw")
     layout = QtWidgets.QVBoxLayout(dlg)
 
-    # Skala
+    # Skala  <-- tutaj zmiana: dodano "1:200"
     scale_layout = QtWidgets.QHBoxLayout()
     scale_label = QtWidgets.QLabel("Skala:")
     scale_combo = QtWidgets.QComboBox()
-    scale_combo.addItems(["1:1", "1:10", "1:20", "1:50", "1:100"])
+    scale_combo.addItems(["1:1", "1:10", "1:50", "1:100", "1:200"])
     scale_layout.addWidget(scale_label)
     scale_layout.addWidget(scale_combo)
     layout.addLayout(scale_layout)
