@@ -52,7 +52,6 @@ def get_model_objects(doc):
     """Zwraca listę obiektów 3D (mają Shape), bez obiektów TechDraw."""
     out = []
     for o in doc.Objects:
-        # pomijamy obiekty TechDraw i obiekty bez kształtu
         if hasattr(o, "Shape") and o.Shape and not o.isDerivedFrom("TechDraw::DrawView"):
             out.append(o)
     return out
@@ -65,16 +64,12 @@ def get_single_elements(objs):
         m = re_num.match(label)
         if m:
             singles.append((m.group(1), o))
-    # opcjonalnie: unikatowe numery, bez duplikatów
-    # singles = list({num: (num, obj) for (num, obj) in singles}.values())
     return singles
 
 def add_labels_list(page, view, singles):
     """Dodaje pionową listę etykietek w ramkach obok widoku (po prawej stronie)."""
-    # bezpieczne konwersje z Quantity -> float
     vx = float(view.X); vy = float(view.Y)
-    vW = float(getattr(view, "Width", 200.0))  # szerokość widoku w mm (TechDraw zwykle udostępnia)
-    # kolumna po prawej stronie widoku:
+    vW = float(getattr(view, "Width", 200.0))
     base_x = vx + vW/2.0 + 30.0
     base_y = vy
     offset = 0.0
@@ -87,11 +82,27 @@ def add_labels_list(page, view, singles):
 <body style="font-family:'Arial'; font-size:10pt; font-weight:bold; text-align:left;">
 <p style="margin:0px; text-align:left;">{num}</p></body></html>"""
         anno.ShowFrame = True
-
-        # ustawienie etykiet w kolumnie (15 mm odstępu)
         anno.X = base_x
         anno.Y = base_y - offset
         offset += 15.0
+
+def objects_crossing_plane_X(objs, x_pos, eps=1e-6):
+    """Zwraca obiekty, których BoundingBox w osi X przecina pozycję x_pos."""
+    res = []
+    for o in objs:
+        bb = o.Shape.BoundBox
+        if bb.XMin - eps <= x_pos <= bb.XMax + eps:
+            res.append(o)
+    return res
+
+def objects_crossing_plane_Y(objs, y_pos, eps=1e-6):
+    """Zwraca obiekty, których BoundingBox w osi Y przecina pozycję y_pos."""
+    res = []
+    for o in objs:
+        bb = o.Shape.BoundBox
+        if bb.YMin - eps <= y_pos <= bb.YMax + eps:
+            res.append(o)
+    return res
 
 # --- główna logika ---
 doc = App.ActiveDocument
@@ -111,17 +122,15 @@ else:
 
             cols = grid.Columns
             rows = grid.Rows
-            col_sizes = grid.ColumnSize
-            row_sizes = grid.RowSize
+            col_sizes = list(grid.ColumnSize)
+            row_sizes = list(grid.RowSize)
 
             log(f"Grid: {cols} kolumn, {rows} wierszy")
 
             tpl_path = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates", tpl)
 
-            # zbuduj listę obiektów 3D będących źródłem rzutni
-            model_objs = get_model_objects(doc)
-            # wyznacz elementy pojedyncze (numery)
-            singles = get_single_elements(model_objs)
+            # pobierz wszystkie obiekty modelowe (3D)
+            model_objs_all = get_model_objects(doc)
 
             # --- Sekcje wzdłuż osi X ---
             x_pos = 0.0
@@ -132,25 +141,31 @@ else:
                     tpl_obj.Template = tpl_path
                     page.Template = tpl_obj
 
-                    view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
-                    view.Source = model_objs
-                    view.Direction = (1,0,0)   # przekrój Y-Z
-                    view.ScaleType = "Custom"
-                    view.Scale = scale_val
-                    page.addView(view)
-                    view.X = 150.0
-                    view.Y = 150.0
+                    model_objs = objects_crossing_plane_X(model_objs_all, x_pos)
 
-                    # lista etykiet obok widoku
-                    add_labels_list(page, view, singles)
+                    view = None
+                    if model_objs:
+                        view = doc.addObject('TechDraw::DrawViewPart', f"View_X_{i}")
+                        view.Source = model_objs
+                        view.Direction = (1,0,0)   # przekrój Y-Z
+                        view.ScaleType = "Custom"
+                        view.Scale = scale_val
+                        page.addView(view)
+                        view.X = 150.0
+                        view.Y = 150.0
 
-                    log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos})")
+                        singles_visible = get_single_elements(model_objs)
+                        add_labels_list(page, view, singles_visible)
+                    else:
+                        log(f"X_{i}: brak obiektów przecinających X={x_pos}, pomijam widok.")
+
+                    log(f"Utworzono przekrój w osi X_{i} (pozycja {x_pos}), obiektów widocznych: {len(model_objs)}")
                     if i < len(col_sizes):
                         x_pos += col_sizes[i]
                 except Exception as e:
                     log(f"X_{i}: błąd tworzenia strony: {e}")
 
-            # --- Sekcje wzdłuż osi Y ---
+            # --- Sekcje wzdłuż osi Y (kierunek patrzenia odwrócony) ---
             y_pos = 0.0
             for j in range(rows+1):
                 try:
@@ -159,24 +174,30 @@ else:
                     tpl_obj.Template = tpl_path
                     page.Template = tpl_obj
 
-                    view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
-                    view.Source = model_objs
-                    view.Direction = (0,1,0)   # przekrój X-Z
-                    view.ScaleType = "Custom"
-                    view.Scale = scale_val
-                    page.addView(view)
-                    view.X = 150.0
-                    view.Y = 150.0
+                    # odwracamy znak y_pos, bo Grid Y działa w ujemnych wartościach w Twoim modelu
+                    model_objs = objects_crossing_plane_Y(model_objs_all, -y_pos)
 
-                    # lista etykiet obok widoku
-                    add_labels_list(page, view, singles)
+                    view = None
+                    if model_objs:
+                        view = doc.addObject('TechDraw::DrawViewPart', f"View_Y_{j}")
+                        view.Source = model_objs
+                        view.Direction = (0,-1,0)   # PRZECIWNA orientacja względem osi Y
+                        view.ScaleType = "Custom"
+                        view.Scale = scale_val
+                        page.addView(view)
+                        view.X = 150.0
+                        view.Y = 150.0
 
-                    log(f"Utworzono przekrój w osi Y_{j} (pozycja {y_pos})")
+                        singles_visible = get_single_elements(model_objs)
+                        add_labels_list(page, view, singles_visible)
+                    else:
+                        log(f"Y_{j}: brak obiektów przecinających Y={-y_pos}, pomijam widok.")
+
+                    log(f"Utworzono przekrój w osi Y_{j} (pozycja {-y_pos}), obiektów widocznych: {len(model_objs)}")
                     if j < len(row_sizes):
                         y_pos += row_sizes[j]
                 except Exception as e:
                     log(f"Y_{j}: błąd tworzenia strony: {e}")
 
-            # końcowy recompute
             doc.recompute()
             log("=== Utworzono przekroje i listy etykiet dla wszystkich osi Grid ===")
