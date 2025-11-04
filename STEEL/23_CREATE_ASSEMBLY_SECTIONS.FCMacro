@@ -51,35 +51,59 @@ def get_single_elements(objs):
     return singles
 
 def add_labels_list(page, view, singles):
-    vx = float(view.X); vy = float(view.Y)
-    vW = float(getattr(view,"Width",200.0))
-    base_x = vx + vW/2.0 + 30.0
-    base_y = vy
-    offset = 0.0
-    for (num,_obj) in singles:
+    vx = float(view.X)
+    vy = float(view.Y)
+    scale = float(view.Scale)
+
+    # --- oblicz rozmiar rzutni na podstawie wszystkich obiektów ---
+    bb = None
+    for src in view.Source:
+        if hasattr(src, "Shape"):
+            if bb is None:
+                bb = src.Shape.BoundBox
+            else:
+                bb.add(src.Shape.BoundBox)
+
+    if bb is not None:
+        if tuple(view.Direction) == (1,0,0):      # widok wzdłuż osi X → używamy (Y,Z)
+            vW = (bb.YMax - bb.YMin) * scale
+            vH = (bb.ZMax - bb.ZMin) * scale
+        elif tuple(view.Direction) == (0,-1,0):   # widok wzdłuż osi Y → używamy (X,Z)
+            vW = (bb.XMax - bb.XMin) * scale
+            vH = (bb.ZMax - bb.ZMin) * scale
+        else:                                     # fallback → XY
+            vW = (bb.XMax - bb.XMin) * scale
+            vH = (bb.YMax - bb.YMin) * scale
+    else:
+        vW = vH = 0.0
+
+    # --- przesunięcie całej grupy o połowę szerokości i wysokości ---
+    ox = vx - vW/2.0
+    oy = vy - vH/2.0
+
+    # --- teraz etykiety ---
+    for (num, obj) in singles:
         anno = App.ActiveDocument.addObject('TechDraw::DrawRichAnno', f"Anno_{num}_{page.Name}")
         page.addView(anno)
         anno.AnnoText = f"""<!DOCTYPE HTML><html><body style="font-family:'Arial'; font-size:10pt; font-weight:bold;"><p>{num}</p></body></html>"""
         anno.ShowFrame = True
-        anno.X = base_x
-        anno.Y = base_y - offset
-        offset += 15.0
 
-def objects_crossing_plane_X(objs, x_pos, eps=1e-6):
-    res=[]
-    for o in objs:
-        bb=o.Shape.BoundBox
-        if bb.XMin-eps <= x_pos <= bb.XMax+eps:
-            res.append(o)
-    return res
+        cx = float(obj.Shape.BoundBox.Center.x)
+        cy = float(obj.Shape.BoundBox.Center.y)
+        cz = float(obj.Shape.BoundBox.Center.z)
 
-def objects_crossing_plane_Y(objs, y_pos, eps=1e-6):
-    res=[]
-    for o in objs:
-        bb=o.Shape.BoundBox
-        if bb.YMin-eps <= y_pos <= bb.YMax+eps:
-            res.append(o)
-    return res
+        if tuple(view.Direction) == (1,0,0):
+            lx = cy * scale + ox
+            ly = cz * scale + oy
+        elif tuple(view.Direction) == (0,-1,0):
+            lx = cx * scale + ox
+            ly = cz * scale + oy
+        else:
+            lx = cx * scale + ox
+            ly = cy * scale + oy
+
+        anno.X = lx
+        anno.Y = ly
 
 def objects_in_x_range_by_center(objs,xmin,xmax,eps=1e-6):
     res=[]
@@ -128,24 +152,16 @@ else:
                     page=doc.addObject('TechDraw::DrawPage',f"Section_X_{i}")
                     tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_X_{i}")
                     tpl_obj.Template=tpl_path; page.Template=tpl_obj
-
                     half_next=0.5*abs(col_sizes[i]) if i<cols else 0.0
                     xmin=x_pos; xmax=x_pos+half_next
-
-                    objs_plane = objects_crossing_plane_X(model_objs_all, x_pos)
-                    objs_range = objects_in_x_range_by_center(model_objs_all, xmin, xmax)
-                    model_objs = list(set(objs_plane + objs_range))
-
-                    log(f"X_{i}: plane={x_pos}, range=[{xmin},{xmax}], found {len(model_objs)} objects")
-
+                    model_objs=objects_in_x_range_by_center(model_objs_all,xmin,xmax)
+                    log(f"X_{i}: range=[{xmin},{xmax}], found {len(model_objs)} objects")
                     if model_objs:
                         view=doc.addObject('TechDraw::DrawViewPart',f"View_X_{i}")
                         view.Source=model_objs; view.Direction=(1,0,0)
                         view.ScaleType="Custom"; view.Scale=scale_val
                         page.addView(view); view.X=150.0; view.Y=150.0
-                        singles_visible=get_single_elements(model_objs)
-                        add_labels_list(page,view,singles_visible)
-
+                        add_labels_list(page,view,get_single_elements(model_objs))
                     if i<len(col_sizes): x_pos+=abs(col_sizes[i])
                 except Exception as e: log(f"X_{i}: błąd {e}")
 
@@ -156,24 +172,16 @@ else:
                     page=doc.addObject('TechDraw::DrawPage',f"Section_Y_{j}")
                     tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_Y_{j}")
                     tpl_obj.Template=tpl_path; page.Template=tpl_obj
-
                     half_next=0.5*abs(row_sizes[j]) if j<rows else 0.0
                     ymin_model=y_pos; ymax_model=y_pos+half_next
-
-                    objs_plane = objects_crossing_plane_Y(model_objs_all, y_pos)
-                    objs_range = objects_in_y_range_by_center(model_objs_all, ymin_model, ymax_model)
-                    model_objs = list(set(objs_plane + objs_range))
-
-                    log(f"Y_{j}: plane={y_pos}, range=[{ymin_model},{ymax_model}], found {len(model_objs)} objects")
-
+                    model_objs=objects_in_y_range_by_center(model_objs_all,ymin_model,ymax_model)
+                    log(f"Y_{j}: range=[{ymin_model},{ymax_model}], found {len(model_objs)} objects")
                     if model_objs:
                         view=doc.addObject('TechDraw::DrawViewPart',f"View_Y_{j}")
                         view.Source=model_objs; view.Direction=(0,-1,0)
                         view.ScaleType="Custom"; view.Scale=scale_val
                         page.addView(view); view.X=150.0; view.Y=150.0
-                        singles_visible=get_single_elements(model_objs)
-                        add_labels_list(page,view,singles_visible)
-
+                        add_labels_list(page,view,get_single_elements(model_objs))
                     if j<len(row_sizes): y_pos+=abs(row_sizes[j])
                 except Exception as e: log(f"Y_{j}: błąd {e}")
 
