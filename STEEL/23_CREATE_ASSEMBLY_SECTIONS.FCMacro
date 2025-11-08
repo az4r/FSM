@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import FreeCAD as App, TechDraw, os, re
 from PySide2 import QtWidgets
+from xml.etree import ElementTree as ET
 
 def log(msg):
     App.Console.PrintMessage(str(msg) + "\n")
@@ -50,6 +51,51 @@ def get_single_elements(objs):
         if m: singles.append((m.group(1),o))
     return singles
 
+# --- pomocnicza: pobiera rozmiar arkusza z pliku szablonu SVG ---
+def _svg_size_from_template(template_path):
+    try:
+        tree = ET.parse(template_path)
+        root = tree.getroot()
+        def to_mm(val):
+            val = val.strip()
+            if val.endswith("mm"): return float(val[:-2])
+            if val.endswith("cm"): return float(val[:-2]) * 10.0
+            if val.endswith("in"): return float(val[:-2]) * 25.4
+            return float(val)
+        w = root.get("width")
+        h = root.get("height")
+        if w and h:
+            return to_mm(w), to_mm(h)
+        vb = root.get("viewBox")
+        if vb:
+            parts = vb.strip().split()
+            if len(parts) == 4:
+                px_to_mm = 0.264583
+                try:
+                    return float(parts[2]) * px_to_mm, float(parts[3]) * px_to_mm
+                except:
+                    pass
+    except Exception:
+        pass
+    return None, None
+
+def get_page_size(page, tpl_path):
+    # 1) spróbuj page.Width/page.Height (nie zawsze dostępne)
+    try:
+        pw = float(getattr(page, "Width"))
+        ph = float(getattr(page, "Height"))
+        return pw, ph
+    except Exception:
+        pass
+    # 2) spróbuj plik SVG szablonu
+    if tpl_path and os.path.isfile(tpl_path):
+        ww, hh = _svg_size_from_template(tpl_path)
+        if ww and hh:
+            return ww, hh
+    # 3) fallback A4
+    return 210.0, 297.0
+
+# add_labels_list: wersja z v2 — etykiety liczone względem view.X/view.Y i przesunięcia grupy
 def add_labels_list(page, view, singles):
     vx = float(view.X)
     vy = float(view.Y)
@@ -65,10 +111,10 @@ def add_labels_list(page, view, singles):
                 bb.add(src.Shape.BoundBox)
 
     if bb is not None:
-        if tuple(view.Direction) == (1,0,0):      # widok wzdłuż osi X → używamy (Y,Z)
+        if tuple(view.Direction) == (1,0,0):      # widok wzdłuż osi X → (Y,Z)
             vW = (bb.YMax - bb.YMin) * scale
             vH = (bb.ZMax - bb.ZMin) * scale
-        elif tuple(view.Direction) == (0,-1,0):   # widok wzdłuż osi Y → używamy (X,Z)
+        elif tuple(view.Direction) == (0,-1,0):   # widok wzdłuż osi Y → (X,Z)
             vW = (bb.XMax - bb.XMin) * scale
             vH = (bb.ZMax - bb.ZMin) * scale
         else:                                     # fallback → XY
@@ -104,6 +150,22 @@ def add_labels_list(page, view, singles):
 
         anno.X = lx
         anno.Y = ly
+
+def objects_crossing_plane_X(objs, x_pos, eps=1e-6):
+    res=[]
+    for o in objs:
+        bb=o.Shape.BoundBox
+        if bb.XMin-eps <= x_pos <= bb.XMax+eps:
+            res.append(o)
+    return res
+
+def objects_crossing_plane_Y(objs, y_pos, eps=1e-6):
+    res=[]
+    for o in objs:
+        bb=o.Shape.BoundBox
+        if bb.YMin-eps <= y_pos <= bb.YMax+eps:
+            res.append(o)
+    return res
 
 def objects_in_x_range_by_center(objs,xmin,xmax,eps=1e-6):
     res=[]
@@ -152,16 +214,43 @@ else:
                     page=doc.addObject('TechDraw::DrawPage',f"Section_X_{i}")
                     tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_X_{i}")
                     tpl_obj.Template=tpl_path; page.Template=tpl_obj
+
                     half_next=0.5*abs(col_sizes[i]) if i<cols else 0.0
                     xmin=x_pos; xmax=x_pos+half_next
-                    model_objs=objects_in_x_range_by_center(model_objs_all,xmin,xmax)
-                    log(f"X_{i}: range=[{xmin},{xmax}], found {len(model_objs)} objects")
+
+                    # używamy logiki z v2: obiekty przecinające płaszczyznę + te w zakresie
+                    objs_plane = objects_crossing_plane_X(model_objs_all, x_pos)
+                    objs_range = objects_in_x_range_by_center(model_objs_all, xmin, xmax)
+                    model_objs = list(set(objs_plane + objs_range))
+
+                    # minimalna poprawka: upewnij się, że Grid jest w źródle widoku
+                    if grid is not None and grid not in model_objs:
+                        model_objs.append(grid)
+
+                    log(f"X_{i}: plane={x_pos}, range=[{xmin},{xmax}], found {len(model_objs)} objects")
+
                     if model_objs:
                         view=doc.addObject('TechDraw::DrawViewPart',f"View_X_{i}")
                         view.Source=model_objs; view.Direction=(1,0,0)
                         view.ScaleType="Custom"; view.Scale=scale_val
-                        page.addView(view); view.X=150.0; view.Y=150.0
-                        add_labels_list(page,view,get_single_elements(model_objs))
+                        page.addView(view)
+
+                        # centrowanie widoku: pobierz rozmiar strony i ustaw X/Y jeśli view ma Width/Height
+                        doc.recompute()
+                        page_w, page_h = get_page_size(page, tpl_path)
+                        try:
+                            vw = float(view.Width)
+                            vh = float(view.Height)
+                            view.X = (page_w - vw) / 2.0
+                            view.Y = (page_h - vh) / 2.0
+                        except Exception:
+                            # fallback: zostaw dotychczasowe/domyslne wartości
+                            pass
+                        doc.recompute()
+
+                        singles_visible=get_single_elements(model_objs)
+                        add_labels_list(page,view,singles_visible)
+
                     if i<len(col_sizes): x_pos+=abs(col_sizes[i])
                 except Exception as e: log(f"X_{i}: błąd {e}")
 
@@ -172,16 +261,40 @@ else:
                     page=doc.addObject('TechDraw::DrawPage',f"Section_Y_{j}")
                     tpl_obj=doc.addObject('TechDraw::DrawSVGTemplate',f"Template_Y_{j}")
                     tpl_obj.Template=tpl_path; page.Template=tpl_obj
+
                     half_next=0.5*abs(row_sizes[j]) if j<rows else 0.0
                     ymin_model=y_pos; ymax_model=y_pos+half_next
-                    model_objs=objects_in_y_range_by_center(model_objs_all,ymin_model,ymax_model)
-                    log(f"Y_{j}: range=[{ymin_model},{ymax_model}], found {len(model_objs)} objects")
+
+                    objs_plane = objects_crossing_plane_Y(model_objs_all, y_pos)
+                    objs_range = objects_in_y_range_by_center(model_objs_all, ymin_model, ymax_model)
+                    model_objs = list(set(objs_plane + objs_range))
+
+                    if grid is not None and grid not in model_objs:
+                        model_objs.append(grid)
+
+                    log(f"Y_{j}: plane={y_pos}, range=[{ymin_model},{ymax_model}], found {len(model_objs)} objects")
+
                     if model_objs:
                         view=doc.addObject('TechDraw::DrawViewPart',f"View_Y_{j}")
                         view.Source=model_objs; view.Direction=(0,-1,0)
                         view.ScaleType="Custom"; view.Scale=scale_val
-                        page.addView(view); view.X=150.0; view.Y=150.0
-                        add_labels_list(page,view,get_single_elements(model_objs))
+                        page.addView(view)
+
+                        # centrowanie widoku: pobierz rozmiar strony i ustaw X/Y jeśli view ma Width/Height
+                        doc.recompute()
+                        page_w, page_h = get_page_size(page, tpl_path)
+                        try:
+                            vw = float(view.Width)
+                            vh = float(view.Height)
+                            view.X = (page_w - vw) / 2.0
+                            view.Y = (page_h - vh) / 2.0
+                        except Exception:
+                            pass
+                        doc.recompute()
+
+                        singles_visible=get_single_elements(model_objs)
+                        add_labels_list(page,view,singles_visible)
+
                     if j<len(row_sizes): y_pos+=abs(row_sizes[j])
                 except Exception as e: log(f"Y_{j}: błąd {e}")
 
