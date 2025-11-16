@@ -142,6 +142,74 @@ def sanitize_value(v):
     s = s.replace("-", "m")
     return s
 
+# --- Dodatkowe funkcje etykiet z makra 23 --- 
+re_num = re.compile(r"^(\d{4})")
+
+def get_single_elements(objs):
+    singles = []
+    for o in objs:
+        label = getattr(o, "Label", "") or ""
+        m = re_num.match(label)
+        if m:
+            singles.append((m.group(1), o))
+    return singles
+
+def add_labels_list(page, view, singles):
+    # opiera się na logice z 23 — liczy pozycje względem view.X/view.Y i rozmiaru view
+    try:
+        vx = float(view.X)
+    except Exception:
+        vx = 0.0
+    try:
+        vy = float(view.Y)
+    except Exception:
+        vy = 0.0
+    try:
+        scale = float(view.Scale)
+    except Exception:
+        scale = 1.0
+
+    # oblicz bounding box całego widoku z Source
+    bb = None
+    for src in view.Source:
+        try:
+            if hasattr(src, "Shape") and src.Shape:
+                if bb is None:
+                    bb = src.Shape.BoundBox
+                else:
+                    bb.add(src.Shape.BoundBox)
+        except Exception:
+            continue
+
+    if bb is not None:
+        # dopasuj orientację: dla Top (XY) używamy X->X, Y->Y
+        # vW, vH w mm przy skali (przybliżenie)
+        vW = (bb.XMax - bb.XMin) * scale
+        vH = (bb.YMax - bb.YMin) * scale
+    else:
+        vW = vH = 0.0
+
+    ox = vx - vW / 2.0
+    oy = vy - vH / 2.0
+
+    for (num, obj) in singles:
+        try:
+            anno = App.ActiveDocument.addObject('TechDraw::DrawRichAnno', f"Anno_{num}_{page.Name}")
+            page.addView(anno)
+            # prosta treść HTML — numer
+            anno.AnnoText = """<!DOCTYPE HTML><html><body style="font-family:'Arial'; font-size:10pt; font-weight:bold;"><p>""" + str(num) + """</p></body></html>"""
+            anno.ShowFrame = True
+            cx = float(obj.Shape.BoundBox.Center.x)
+            cy = float(obj.Shape.BoundBox.Center.y)
+            cz = float(obj.Shape.BoundBox.Center.z)
+            # dla top view (Direction (0,0,1)) używamy X= cx, Y=cy
+            lx = cx * scale + ox
+            ly = cy * scale + oy
+            anno.X = lx
+            anno.Y = ly
+        except Exception:
+            continue
+
 # --- Główna funkcja: rzut X-Y z zakresem Z ---
 def create_xy_top_view_with_z_range():
     doc = App.ActiveDocument
@@ -189,6 +257,14 @@ def create_xy_top_view_with_z_range():
     view.ScaleType = "Custom"
     view.Scale = scale_val
     page.addView(view)
+
+    # dodaj etykiety (numery pojedynczych elementów) — minimalne dodanie z 23
+    try:
+        singles_visible = get_single_elements(model_objs)
+        if singles_visible:
+            add_labels_list(page, view, singles_visible)
+    except Exception:
+        pass
 
     # 4) Centrowanie widoku na stronie
     doc.recompute()
