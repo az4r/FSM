@@ -104,7 +104,7 @@ def export_visible_hidden_table_dxf():
         FreeCAD.Console.PrintMessage(f"Tworzę tabelę z arkusza: {sheet.Label}\n")
 
         # parametry tabeli
-        cell_w = 30
+        cell_w = 40
         cell_h = 10
         start_x, start_y = 0, 0
 
