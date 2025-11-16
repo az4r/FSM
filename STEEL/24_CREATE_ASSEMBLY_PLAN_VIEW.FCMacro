@@ -99,6 +99,14 @@ def objects_in_z_range(objs, zmin, zmax, eps=1e-6):
             continue
     return res
 
+# --- helper do bezpiecznej nazwy z zakresu (TERAZ BEZ miejsc po przecinku) ---
+def sanitize_value(v):
+    # zaokrąglamy do najbliższej liczby całkowitej i tworzymy bezpieczną nazwę
+    iv = int(round(v))
+    s = str(iv)
+    s = s.replace("-", "m")
+    return s
+
 # --- Główna funkcja: rzut X-Y z zakresem Z ---
 def create_xy_top_view_with_z_range():
     doc = App.ActiveDocument
@@ -133,8 +141,13 @@ def create_xy_top_view_with_z_range():
         log(f"Brak obiektów w zakresie Z=[{zmin}..{zmax}].")
         return
 
+    # przygotuj bezpieczny dopisek do nazwy (bez miejsc po przecinku)
+    zmin_s = sanitize_value(zmin)
+    zmax_s = sanitize_value(zmax)
+    page_name = f"TopView_XY_{zmin_s}_{zmax_s}"
+
     # 4) Utwórz stronę i widok Top (XY)
-    page = doc.addObject('TechDraw::DrawPage', 'TopView_XY')
+    page = doc.addObject('TechDraw::DrawPage', page_name)
     tpl_obj = doc.addObject('TechDraw::DrawSVGTemplate', 'Template_TopView_XY')
     tpl_obj.Template = tpl_path
     page.Template = tpl_obj
