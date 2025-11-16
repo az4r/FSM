@@ -92,7 +92,8 @@ def objects_in_z_range(objs, zmin, zmax, eps=1e-6):
     for o in objs:
         try:
             bb = o.Shape.BoundBox
-            if bb.ZMin >= zmin - eps and bb.ZMax <= zmax + eps:
+            # zmiana: wybieramy obiekt gdy jego bbox CHOCIAŻBY CZĘŚCIOWO przecina zakres [zmin, zmax]
+            if (bb.ZMax >= zmin - eps) and (bb.ZMin <= zmax + eps):
                 res.append(o)
         except Exception:
             continue
