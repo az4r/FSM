@@ -3,14 +3,12 @@ import FreeCAD, FreeCADGui, TechDraw
 import os, datetime, re
 import ezdxf
 
-def log(msg):
-    FreeCAD.Console.PrintMessage(str(msg) + "\n")
-
 def export_visible_hidden_table_dxf():
     doc = FreeCAD.ActiveDocument
     if not doc or not doc.FileName:
         FreeCAD.Console.PrintError("Dokument musi być zapisany na dysku.\n")
         return
+
     model_dir = os.path.dirname(doc.FileName)
     export_dir = os.path.join(model_dir, "EXPORT")
     os.makedirs(export_dir, exist_ok=True)
@@ -30,8 +28,8 @@ def export_visible_hidden_table_dxf():
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     dxf_visible = os.path.join(export_dir, f"{page.Label}_{ts}_visible.dxf")
-    dxf_hidden = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.dxf")
-    dxf_final = os.path.join(export_dir, f"{page.Label}_{ts}_combined.dxf")
+    dxf_hidden  = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.dxf")
+    dxf_final   = os.path.join(export_dir, f"{page.Label}_{ts}_combined.dxf")
 
     # 1) Eksport widocznych
     for v in page.Views:
@@ -54,14 +52,15 @@ def export_visible_hidden_table_dxf():
     msp = doc_out.modelspace()
 
     # utwórz warstwy
-    doc_out.layers.new(name="Visible")
-    doc_out.layers.new(name="Hidden")
-    doc_out.layers.new(name="Table")
-    # --- minimalna zmiana: dodajemy warstwę Labels ---
-    if "Labels" not in doc_out.layers:
-        doc_out.layers.new(name="Labels")
+    # minimalnie: Visible, Hidden, Table oraz Labels (ramki też na Labels — zgodnie z 2X)
+    for lname in ("Visible", "Hidden", "Table", "Labels"):
+        if lname not in doc_out.layers:
+            try:
+                doc_out.layers.new(name=lname)
+            except Exception:
+                pass
 
-    # dodaj styl tekstu Arial
+    # dodaj styl tekstu Arial (jeśli możliwe)
     if "Arial" not in doc_out.styles:
         try:
             doc_out.styles.new("Arial", dxfattribs={"font": "arial.ttf"})
@@ -69,6 +68,7 @@ def export_visible_hidden_table_dxf():
             pass
 
     # 4) Funkcja kopiująca encje z pliku źródłowego
+    # filtrujemy TEXT i MTEXT aby uniknąć kopiowania oryginalnych etykiet TechDraw
     def copy_entities(srcfile, target_layer):
         try:
             src = ezdxf.readfile(srcfile)
@@ -77,13 +77,22 @@ def export_visible_hidden_table_dxf():
             return
         for e in src.modelspace():
             try:
+                try:
+                    etype = e.dxftype()
+                except Exception:
+                    etype = None
+                if etype in ("TEXT", "MTEXT"):
+                    continue
                 new_e = e.copy()
-                new_e.dxf.layer = target_layer
+                try:
+                    new_e.dxf.layer = target_layer
+                except Exception:
+                    pass
                 msp.add_entity(new_e)
             except Exception as ex:
                 FreeCAD.Console.PrintError(f"Nie udało się skopiować encji: {ex}\n")
 
-    # kopiuj encje
+    # kopiuj encje (bez TEXT/MTEXT)
     copy_entities(dxf_visible, "Visible")
     copy_entities(dxf_hidden, "Hidden")
 
@@ -93,20 +102,23 @@ def export_visible_hidden_table_dxf():
         tbl = table_views[0]
         sheet = tbl.Source
         FreeCAD.Console.PrintMessage(f"Tworzę tabelę z arkusza: {sheet.Label}\n")
+
         # parametry tabeli
         cell_w = 30
         cell_h = 10
         start_x, start_y = 0, 0
+
         # znajdź wszystkie niepuste komórki
         cell_re = re.compile(r"([A-Z]+)(\d+)")
         cells = []
         max_row, max_col = 0, 0
+
         for prop in sheet.PropertiesList:
             m = cell_re.match(prop)
             if not m:
                 continue
             val = sheet.getContents(prop)
-            if not val.strip():
+            if not str(val).strip():
                 continue
             col_letters, row_str = m.groups()
             row = int(row_str)
@@ -117,40 +129,56 @@ def export_visible_hidden_table_dxf():
             cells.append((row, col, val))
             max_row = max(max_row, row)
             max_col = max(max_col, col)
+
         if not cells:
             FreeCAD.Console.PrintMessage("Arkusz pusty, brak tabeli do eksportu.\n")
         else:
             rows = max_row
             cols = max_col
+
             # rysuj siatkę
             for r in range(rows+1):
                 y = start_y + r*cell_h
-                msp.add_line((start_x, y), (start_x+cols*cell_w, y), dxfattribs={"layer":"Table"})
+                try:
+                    msp.add_line((start_x, y), (start_x+cols*cell_w, y), dxfattribs={"layer":"Table"})
+                except Exception:
+                    pass
             for c in range(cols+1):
                 x = start_x + c*cell_w
-                msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
+                try:
+                    msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
+                except Exception:
+                    pass
+
             # wpisz teksty Arial 2.5mm z formatowaniem liczb
             for row, col, val in cells:
                 try:
-                    num = float(val.replace(",", "."))
+                    num = float(str(val).replace(",", "."))
                     if num.is_integer():
                         val_fmt = str(int(num))
                     else:
                         val_fmt = "{:.2f}".format(num)
                 except:
-                    val_fmt = val
+                    val_fmt = str(val)
                 x = start_x + (col-1)*cell_w + 2
                 y = start_y + (rows-row)*cell_h + 2
-                msp.add_text(val_fmt, dxfattribs={
-                    "height": 2.5,
-                    "layer": "Table",
-                    "style": "Arial",
-                    "insert": (x,y)
-                })
+                try:
+                    msp.add_text(val_fmt, dxfattribs={
+                        "height": 2.5,
+                        "layer": "Table",
+                        "style": "Arial",
+                        "insert": (x,y)
+                    })
+                except Exception:
+                    pass
     else:
         FreeCAD.Console.PrintMessage("Brak tabeli TechDraw na stronie.\n")
 
-    # --- Nowa minimalna logika: dodajemy etykiety DrawRichAnno na warstwę Labels ---
+    # -----------------------
+    # DODATKOWA CZĘŚĆ: eksport etykiet (minimalne, z 2X)
+    # -----------------------
+
+    # --- Zbieranie etykiet DrawRichAnno ---
     def _strip_html(s):
         return re.sub(r"<[^>]*>", "", s or "").strip()
 
@@ -176,27 +204,141 @@ def export_visible_hidden_table_dxf():
         FreeCAD.Console.PrintError("Błąd podczas zbierania etykiet: " + str(e) + "\n")
         annos = []
 
-    # Dodaj encje TEXT do modelspace na warstwie Labels
+    # --- Dodaj teksty i ramki do DXF z wyrównaniem centralnym (próby i fallbacky)
+    # używamy anchor_mode = "middle-center" i ramki rysujemy na warstwie "Labels" (jak w 2X)
     if annos:
         text_height = 3.0
+        char_width_factor = 0.6
+        padding_x = 1.5
+        padding_y = 1.0
+
+        anchor_mode = "middle-center"
+
+        added = 0
         for a in annos:
             try:
-                # minimalne atrybuty — usuwamy halign/valign bo nie są obsługiwane przez niektóre wersje ezdxf
-                txt_ent = msp.add_text(str(a["text"]), dxfattribs={
-                    "insert": (a["x"], a["y"]),
-                    "height": text_height,
-                    "layer": "Labels",
-                    "style": "Arial"
-                })
+                txt = str(a["text"])
+                x = float(a["x"])
+                y = float(a["y"])
+
+                est_char_w = char_width_factor * text_height
+                text_w = max(0.1, len(txt) * est_char_w)
+                text_h = text_height
+
+                inserted = False
+                tmp_text_ent = None
+
+                if anchor_mode == "baseline-left":
+                    xmin = x - padding_x
+                    ymin = y - padding_y
+                    xmax = xmin + text_w + 2.0 * padding_x
+                    ymax = ymin + text_h + 2.0 * padding_y
+
+                elif anchor_mode == "middle-center":
+                    xmin = x - (text_w / 2.0) - padding_x
+                    ymin = y - (text_h / 2.0) - padding_y
+                    xmax = x + (text_w / 2.0) + padding_x
+                    ymax = y + (text_h / 2.0) + padding_y
+
+                elif anchor_mode == "center-bottom":
+                    xmin = x - (text_w / 2.0) - padding_x
+                    ymin = y - padding_y
+                    xmax = x + (text_w / 2.0) + padding_x
+                    ymax = ymin + text_h + 2.0 * padding_y
+
+                else:
+                    xmin = x - padding_x
+                    ymin = y - padding_y
+                    xmax = xmin + text_w + 2.0 * padding_x
+                    ymax = ymin + text_h + 2.0 * padding_y
+
+                center_x = (xmin + xmax) / 2.0
+                center_y = (ymin + ymax) / 2.0
+
+                # 1) spróbuj dodać TEXT i ustawić align przez set_pos
+                try:
+                    tmp_text_ent = msp.add_text(txt, dxfattribs={
+                        "insert": (center_x, center_y),
+                        "height": text_height,
+                        "layer": "Labels",
+                        "style": "Arial"
+                    })
+                    for align_try in ("CENTER", "MIDDLE_CENTER", "MIDDLE", "CENTER_MIDDLE", "CENTER_CENTER"):
+                        try:
+                            tmp_text_ent.set_pos((center_x, center_y), align=align_try)
+                            inserted = True
+                            break
+                        except Exception:
+                            continue
+                    if not inserted:
+                        try:
+                            msp.delete_entity(tmp_text_ent)
+                        except Exception:
+                            try:
+                                doc_out.entitydb.delete_entity(tmp_text_ent.dxf.handle)
+                            except Exception:
+                                pass
+                        tmp_text_ent = None
+                except Exception:
+                    tmp_text_ent = None
+                    inserted = False
+
+                # 2) jeśli nie, spróbuj MTEXT z attachment_point=5
+                if not inserted:
+                    try:
+                        msp.add_mtext(txt, dxfattribs={
+                            "insert": (center_x, center_y),
+                            "attachment_point": 5,
+                            "char_height": text_height,
+                            "layer": "Labels",
+                            "style": "Arial"
+                        })
+                        inserted = True
+                    except Exception:
+                        pass
+
+                # 3) fallback: zwykły TEXT ustawiony tak, by środek był w center
+                if not inserted:
+                    try:
+                        insert_x = center_x - text_w / 2.0
+                        insert_y = center_y - text_h / 2.0
+                        msp.add_text(txt, dxfattribs={
+                            "insert": (insert_x, insert_y),
+                            "height": text_height,
+                            "layer": "Labels",
+                            "style": "Arial"
+                        })
+                        inserted = True
+                    except Exception:
+                        pass
+
+                # narysuj ramkę na warstwie Labels (tak jak w 2X)
+                try:
+                    msp.add_lwpolyline([(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax), (xmin, ymin)],
+                                       dxfattribs={"layer": "Labels", "closed": True})
+                except Exception:
+                    try:
+                        msp.add_line((xmin, ymin), (xmax, ymin), dxfattribs={"layer": "Labels"})
+                        msp.add_line((xmax, ymin), (xmax, ymax), dxfattribs={"layer": "Labels"})
+                        msp.add_line((xmax, ymax), (xmin, ymax), dxfattribs={"layer": "Labels"})
+                        msp.add_line((xmin, ymax), (xmin, ymin), dxfattribs={"layer": "Labels"})
+                    except Exception:
+                        pass
+
+                added += 1
             except Exception as e:
-                FreeCAD.Console.PrintError(f"Nie udało się dodać etykiety {a.get('name','')} do DXF: {e}\n")
-        FreeCAD.Console.PrintMessage(f"Dodano {len(annos)} etykiet na warstwę 'Labels' w combined DXF.\n")
+                FreeCAD.Console.PrintError(f"Nie udało się przetworzyć etykiety {a.get('name','')}: {e}\n")
+
+        FreeCAD.Console.PrintMessage(f"Dodano {added} etykiet na warstwę 'Labels' z ramkami również na 'Labels' w combined DXF.\n")
     else:
         FreeCAD.Console.PrintMessage("Nie znaleziono etykiet DrawRichAnno do dodania do DXF.\n")
 
     # 6) Zapisz wynik
-    doc_out.saveas(dxf_final)
-    FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą i etykietami: " + dxf_final + "\n")
+    try:
+        doc_out.saveas(dxf_final)
+        FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą i etykietami: " + dxf_final + "\n")
+    except Exception as e:
+        FreeCAD.Console.PrintError("Błąd zapisu DXF: " + str(e) + "\n")
 
     # 7) Przywróć HardHidden=False
     for v in page.Views:
