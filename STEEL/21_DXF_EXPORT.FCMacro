@@ -3,12 +3,14 @@ import FreeCAD, FreeCADGui, TechDraw
 import os, datetime, re
 import ezdxf
 
+def log(msg):
+    FreeCAD.Console.PrintMessage(str(msg) + "\n")
+
 def export_visible_hidden_table_dxf():
     doc = FreeCAD.ActiveDocument
     if not doc or not doc.FileName:
         FreeCAD.Console.PrintError("Dokument musi być zapisany na dysku.\n")
         return
-
     model_dir = os.path.dirname(doc.FileName)
     export_dir = os.path.join(model_dir, "EXPORT")
     os.makedirs(export_dir, exist_ok=True)
@@ -28,8 +30,8 @@ def export_visible_hidden_table_dxf():
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     dxf_visible = os.path.join(export_dir, f"{page.Label}_{ts}_visible.dxf")
-    dxf_hidden  = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.dxf")
-    dxf_final   = os.path.join(export_dir, f"{page.Label}_{ts}_combined.dxf")
+    dxf_hidden = os.path.join(export_dir, f"{page.Label}_{ts}_hidden.dxf")
+    dxf_final = os.path.join(export_dir, f"{page.Label}_{ts}_combined.dxf")
 
     # 1) Eksport widocznych
     for v in page.Views:
@@ -55,10 +57,16 @@ def export_visible_hidden_table_dxf():
     doc_out.layers.new(name="Visible")
     doc_out.layers.new(name="Hidden")
     doc_out.layers.new(name="Table")
+    # --- minimalna zmiana: dodajemy warstwę Labels ---
+    if "Labels" not in doc_out.layers:
+        doc_out.layers.new(name="Labels")
 
     # dodaj styl tekstu Arial
     if "Arial" not in doc_out.styles:
-        doc_out.styles.new("Arial", dxfattribs={"font": "arial.ttf"})
+        try:
+            doc_out.styles.new("Arial", dxfattribs={"font": "arial.ttf"})
+        except Exception:
+            pass
 
     # 4) Funkcja kopiująca encje z pliku źródłowego
     def copy_entities(srcfile, target_layer):
@@ -85,17 +93,14 @@ def export_visible_hidden_table_dxf():
         tbl = table_views[0]
         sheet = tbl.Source
         FreeCAD.Console.PrintMessage(f"Tworzę tabelę z arkusza: {sheet.Label}\n")
-
         # parametry tabeli
         cell_w = 30
         cell_h = 10
         start_x, start_y = 0, 0
-
         # znajdź wszystkie niepuste komórki
         cell_re = re.compile(r"([A-Z]+)(\d+)")
         cells = []
         max_row, max_col = 0, 0
-
         for prop in sheet.PropertiesList:
             m = cell_re.match(prop)
             if not m:
@@ -112,13 +117,11 @@ def export_visible_hidden_table_dxf():
             cells.append((row, col, val))
             max_row = max(max_row, row)
             max_col = max(max_col, col)
-
         if not cells:
             FreeCAD.Console.PrintMessage("Arkusz pusty, brak tabeli do eksportu.\n")
         else:
             rows = max_row
             cols = max_col
-
             # rysuj siatkę
             for r in range(rows+1):
                 y = start_y + r*cell_h
@@ -126,10 +129,8 @@ def export_visible_hidden_table_dxf():
             for c in range(cols+1):
                 x = start_x + c*cell_w
                 msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
-
             # wpisz teksty Arial 2.5mm z formatowaniem liczb
             for row, col, val in cells:
-                # spróbuj sformatować jako liczbę
                 try:
                     num = float(val.replace(",", "."))
                     if num.is_integer():
@@ -137,8 +138,7 @@ def export_visible_hidden_table_dxf():
                     else:
                         val_fmt = "{:.2f}".format(num)
                 except:
-                    val_fmt = val  # jeśli nie liczba, zostaw oryginał
-
+                    val_fmt = val
                 x = start_x + (col-1)*cell_w + 2
                 y = start_y + (rows-row)*cell_h + 2
                 msp.add_text(val_fmt, dxfattribs={
@@ -150,9 +150,53 @@ def export_visible_hidden_table_dxf():
     else:
         FreeCAD.Console.PrintMessage("Brak tabeli TechDraw na stronie.\n")
 
+    # --- Nowa minimalna logika: dodajemy etykiety DrawRichAnno na warstwę Labels ---
+    def _strip_html(s):
+        return re.sub(r"<[^>]*>", "", s or "").strip()
+
+    try:
+        annos = []
+        for v in getattr(page, "Views", []):
+            if getattr(v, "TypeId", "") == "TechDraw::DrawRichAnno":
+                txt_raw = getattr(v, "AnnoText", "")
+                txt = _strip_html(txt_raw)
+                x = float(getattr(v, "X", 0.0))
+                y = float(getattr(v, "Y", 0.0))
+                if txt:
+                    annos.append({"text": txt, "x": x, "y": y, "name": getattr(v, "Name", "")})
+        if not annos:
+            for o in FreeCAD.ActiveDocument.Objects:
+                if getattr(o, "TypeId", "") == "TechDraw::DrawRichAnno":
+                    txt = _strip_html(getattr(o, "AnnoText", ""))
+                    x = float(getattr(o, "X", 0.0))
+                    y = float(getattr(o, "Y", 0.0))
+                    if txt:
+                        annos.append({"text": txt, "x": x, "y": y, "name": getattr(o, "Name", "")})
+    except Exception as e:
+        FreeCAD.Console.PrintError("Błąd podczas zbierania etykiet: " + str(e) + "\n")
+        annos = []
+
+    # Dodaj encje TEXT do modelspace na warstwie Labels
+    if annos:
+        text_height = 3.0
+        for a in annos:
+            try:
+                # minimalne atrybuty — usuwamy halign/valign bo nie są obsługiwane przez niektóre wersje ezdxf
+                txt_ent = msp.add_text(str(a["text"]), dxfattribs={
+                    "insert": (a["x"], a["y"]),
+                    "height": text_height,
+                    "layer": "Labels",
+                    "style": "Arial"
+                })
+            except Exception as e:
+                FreeCAD.Console.PrintError(f"Nie udało się dodać etykiety {a.get('name','')} do DXF: {e}\n")
+        FreeCAD.Console.PrintMessage(f"Dodano {len(annos)} etykiet na warstwę 'Labels' w combined DXF.\n")
+    else:
+        FreeCAD.Console.PrintMessage("Nie znaleziono etykiet DrawRichAnno do dodania do DXF.\n")
+
     # 6) Zapisz wynik
     doc_out.saveas(dxf_final)
-    FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą: " + dxf_final + "\n")
+    FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą i etykietami: " + dxf_final + "\n")
 
     # 7) Przywróć HardHidden=False
     for v in page.Views:
