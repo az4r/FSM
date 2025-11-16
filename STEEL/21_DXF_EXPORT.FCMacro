@@ -146,7 +146,7 @@ def export_visible_hidden_table_dxf():
             for c in range(cols+1):
                 x = start_x + c*cell_w
                 try:
-                    msp.add_line((x, start_y), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
+                    msp.add_line((x, start_x), (x, start_y+rows*cell_h), dxfattribs={"layer":"Table"})
                 except Exception:
                     pass
 
@@ -339,6 +339,33 @@ def export_visible_hidden_table_dxf():
         FreeCAD.Console.PrintMessage("Utworzono scalony DXF z tabelą i etykietami: " + dxf_final + "\n")
     except Exception as e:
         FreeCAD.Console.PrintError("Błąd zapisu DXF: " + str(e) + "\n")
+
+    # --- DODATKOWY CLEANUP: usuń *_visible i *_hidden oraz przemianuj *_combined na bez dopisku ---
+    try:
+        for f in (dxf_visible, dxf_hidden):
+            try:
+                if os.path.isfile(f):
+                    os.remove(f)
+                    FreeCAD.Console.PrintMessage("Usunięto tymczasowy plik: " + f + "\n")
+            except Exception as e:
+                FreeCAD.Console.PrintError("Nie udało się usunąć pliku " + f + ": " + str(e) + "\n")
+
+        base, ext = os.path.splitext(dxf_final)
+        if base.endswith("_combined"):
+            new_base = base[: -len("_combined")]
+            new_name = new_base + ext
+            try:
+                if os.path.isfile(new_name):
+                    os.remove(new_name)
+                os.replace(dxf_final, new_name)
+                FreeCAD.Console.PrintMessage("Zmieniono nazwę pliku: " + dxf_final + " -> " + new_name + "\n")
+                dxf_final = new_name
+            except Exception as e:
+                FreeCAD.Console.PrintError("Nie udało się przemianować combined DXF: " + str(e) + "\n")
+        else:
+            FreeCAD.Console.PrintMessage("Nazwa combined DXF nie kończy się na '_combined', pomijam rename.\n")
+    except Exception as e:
+        FreeCAD.Console.PrintError("Błąd podczas cleanupu plików DXF: " + str(e) + "\n")
 
     # 7) Przywróć HardHidden=False
     for v in page.Views:
