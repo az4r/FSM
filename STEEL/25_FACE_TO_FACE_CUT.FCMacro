@@ -1,0 +1,185 @@
+import FreeCAD, FreeCADGui
+from PySide2 import QtWidgets, QtCore
+import os
+
+# --- USTAWIENIA ---
+FILE1 = "face1_info.txt"
+FILE2 = "face2_info.txt"
+
+# --- GLOBALNE: kontrola jednego obserwatora i jednego okna ---
+currentObserver = None
+currentDialog = None
+
+# --- POMOCE ---
+def get_model_dir():
+    doc = FreeCAD.ActiveDocument
+    if doc and getattr(doc, "FileName", None):
+        return os.path.dirname(doc.FileName)
+    # brak verbose ostrzeżenia — domyślnie katalog domowy
+    return os.path.expanduser("~")
+
+def safe_str(v):
+    try:
+        return str(v)
+    except Exception:
+        return "<unavailable>"
+
+def write_face_info(filepath, obj_name, face):
+    lines = []
+    lines.append(f"Object: {obj_name}")
+    lines.append(f"ShapeType: {safe_str(getattr(face, 'ShapeType', ''))}")
+    lines.append(f"Area: {safe_str(getattr(face, 'Area', ''))}")
+    lines.append(f"Volume: {safe_str(getattr(face, 'Volume', 0.0))}")
+    lines.append(f"Mass: {safe_str(getattr(face, 'Mass', getattr(face, 'Area', 0.0)))}")
+    lines.append(f"CenterOfMass: {safe_str(getattr(face, 'CenterOfMass', ''))}")
+    lines.append(f"BoundBox: {safe_str(getattr(face, 'BoundBox', ''))}")
+    lines.append(f"Placement: {safe_str(getattr(face, 'Placement', None))}")
+    try:
+        lines.append(f"NormalAt(0,0): {safe_str(face.normalAt(0,0))}")
+    except Exception:
+        lines.append("NormalAt(0,0): <unavailable>")
+    lines.append(f"Edges count: {len(getattr(face, 'Edges', []))}")
+    lines.append(f"Vertexes count: {len(getattr(face, 'Vertexes', []))}")
+    lines.append(f"Surface: {safe_str(getattr(face, 'Surface', None))}")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+def read_object_label(filename):
+    doc = FreeCAD.ActiveDocument
+    if not doc or not getattr(doc, "FileName", None):
+        return "brak"
+    filepath = os.path.join(os.path.dirname(doc.FileName), filename)
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("Object:"):
+                        return line.split(":", 1)[1].strip()
+        except Exception:
+            return "brak"
+    return "brak"
+
+# --- OBSERWATOR ---
+class DiagnosticObserver:
+    def __init__(self, targetFilename, onDone):
+        global currentObserver
+        if currentObserver is not None:
+            try:
+                FreeCADGui.Selection.removeObserver(currentObserver)
+            except Exception:
+                pass
+        currentObserver = self
+
+        self.targetFilename = targetFilename
+        self.onDone = onDone
+        FreeCADGui.Selection.addObserver(self)
+        # nie wypisujemy tu zbędnych informacji — komunikat pojawia się przy kliknięciu przycisku
+
+    # API: addSelection(self, doc_name, obj_name, sub, pnt)
+    def addSelection(self, doc_name, obj_name, sub, pnt):
+        try:
+            sel = FreeCADGui.Selection.getSelectionEx()
+            if not sel or not sel[0].SubObjects:
+                return
+            face = sel[0].SubObjects[0]
+            if getattr(face, "ShapeType", "") != "Face":
+                return
+
+            model_dir = get_model_dir()
+            filepath = os.path.join(model_dir, self.targetFilename)
+            write_face_info(filepath, obj_name, face)
+
+            # tylko końcowy komunikat
+            try:
+                FreeCAD.Console.PrintMessage(f">>> Dane zapisane do: {filepath}\n")
+            except Exception:
+                try:
+                    FreeCAD.Console.PrintError(f">>> Dane zapisane do: {filepath}\n")
+                except Exception:
+                    pass
+
+            self._finish()
+
+        except Exception:
+            # cicho kończymy — brak dumpów do konsoli
+            self._finish()
+
+    def _finish(self):
+        global currentObserver
+        try:
+            FreeCADGui.Selection.removeObserver(self)
+        except Exception:
+            pass
+        currentObserver = None
+
+        if callable(self.onDone):
+            QtCore.QTimer.singleShot(100, self.onDone)
+
+# --- DIALOG ---
+class MyDialog(QtWidgets.QDialog):
+    def __init__(self):
+        super(MyDialog, self).__init__()
+        self.setWindowTitle("Makro diagnostyczne (Face1/Face2)")
+
+        layout = QtWidgets.QVBoxLayout()
+
+        # Wiersz 1
+        self.btn1 = QtWidgets.QPushButton("Wybierz Face 1")
+        self.label1 = QtWidgets.QLabel(read_object_label(FILE1))
+        h1 = QtWidgets.QHBoxLayout()
+        h1.addWidget(self.btn1)
+        h1.addWidget(self.label1)
+        layout.addLayout(h1)
+
+        # Wiersz 2
+        self.btn2 = QtWidgets.QPushButton("Wybierz Face 2")
+        self.label2 = QtWidgets.QLabel(read_object_label(FILE2))
+        h2 = QtWidgets.QHBoxLayout()
+        h2.addWidget(self.btn2)
+        h2.addWidget(self.label2)
+        layout.addLayout(h2)
+
+        # OK (zamyka okno bez nasłuchu)
+        self.okbtn = QtWidgets.QPushButton("OK")
+        layout.addWidget(self.okbtn)
+
+        self.setLayout(layout)
+
+        # Sygnały
+        self.btn1.clicked.connect(lambda: self.startDiagnostic(FILE1, button_label="Wybierz Face 1"))
+        self.btn2.clicked.connect(lambda: self.startDiagnostic(FILE2, button_label="Wybierz Face 2"))
+        self.okbtn.clicked.connect(self.accept)
+
+        # (opcjonalnie) komunikat przy uruchomieniu dialogu — odkomentuj jeśli chcesz
+        # try:
+        #     FreeCAD.Console.PrintMessage(">>> Makro gotowe. Użyj przycisków by wybrać face.\n")
+        # except Exception:
+        #     pass
+
+    def startDiagnostic(self, filename, button_label=None):
+        # Wypisz krótką informację do Report view, żeby pozostała tam widoczna
+        if button_label:
+            try:
+                FreeCAD.Console.PrintMessage(f">>> {button_label}\n")
+            except Exception:
+                pass
+
+        # Ukrywamy okno (by skupić się na widoku 3D) i uruchamiamy obserwator; po zapisie wracamy i odświeżamy labele
+        self.hide()
+        DiagnosticObserver(filename, onDone=self._returnAndRefresh)
+
+    def _returnAndRefresh(self):
+        # Odśwież labele z plików i pokaż okno ponownie
+        self.label1.setText(read_object_label(FILE1))
+        self.label2.setText(read_object_label(FILE2))
+        self.show()
+
+# --- START ---
+def run():
+    global currentDialog
+    if currentDialog is None:
+        currentDialog = MyDialog()
+    currentDialog.show()
+
+run()
