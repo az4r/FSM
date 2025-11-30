@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
-# Face-to-Face: oryginalne UI + distToShape logic (console only)
-# Bazowane na Twoim 1.txt, rozszerzone o obliczenia z 2.txt (bez tworzenia geometrii)
+# Face-to-Face: pomiar przez stałą współrzędną narożników (x/y/z)
+# Zasada: z każdego face pobieramy 4 punkty narożne (rogi bounding rectangle w płaszczyźnie face).
+# Jeśli wszystkie 4 punkty mają tę samą wartość jednej współrzędnej (x lub y lub z) w tolerancji,
+# to tę wartość zapamiętujemy. Wynik = abs(value_face1 - value_face2).
+# Nie tworzymy żadnych obiektów w dokumencie; wszystko wypisujemy do Report view.
 import FreeCAD, FreeCADGui
 from PySide2 import QtWidgets, QtCore
 import os, math, traceback
@@ -8,17 +11,17 @@ import os, math, traceback
 # --- USTAWIENIA ---
 FILE1 = "face1_info.txt"
 FILE2 = "face2_info.txt"
+EPS_CONST = 1e-6  # tolerancja porównania współrzędnych
 
-# --- GLOBALNE: kontrola jednego obserwatora i jednego okna ---
+# --- GLOBALNE ---
 currentObserver = None
 currentDialog = None
 
-# --- POMOCE (oryginalne) ---
+# --- POMOCE I/O (oryginalne) ---
 def get_model_dir():
     doc = FreeCAD.ActiveDocument
     if doc and getattr(doc, "FileName", None):
         return os.path.dirname(doc.FileName)
-    # brak verbose ostrzeżenia — domyślnie katalog domowy
     return os.path.expanduser("~")
 
 def safe_str(v):
@@ -73,13 +76,10 @@ class DiagnosticObserver:
             except Exception:
                 pass
         currentObserver = self
-
         self.targetFilename = targetFilename
         self.onDone = onDone
         FreeCADGui.Selection.addObserver(self)
-        # nie wypisujemy tu zbędnych informacji — komunikat pojawia się przy kliknięciu przycisku
 
-    # API: addSelection(self, doc_name, obj_name, sub, pnt)
     def addSelection(self, doc_name, obj_name, sub, pnt):
         try:
             sel = FreeCADGui.Selection.getSelectionEx()
@@ -88,24 +88,15 @@ class DiagnosticObserver:
             face = sel[0].SubObjects[0]
             if getattr(face, "ShapeType", "") != "Face":
                 return
-
             model_dir = get_model_dir()
             filepath = os.path.join(model_dir, self.targetFilename)
             write_face_info(filepath, obj_name, face)
-
-            # tylko końcowy komunikat
             try:
                 FreeCAD.Console.PrintMessage(f">>> Dane zapisane do: {filepath}\n")
             except Exception:
-                try:
-                    FreeCAD.Console.PrintError(f">>> Dane zapisane do: {filepath}\n")
-                except Exception:
-                    pass
-
+                pass
             self._finish()
-
         except Exception:
-            # cicho kończymy — brak dumpów do konsoli
             self._finish()
 
     def _finish(self):
@@ -115,26 +106,127 @@ class DiagnosticObserver:
         except Exception:
             pass
         currentObserver = None
-
         if callable(self.onDone):
             QtCore.QTimer.singleShot(100, self.onDone)
 
-# --- DODATKOWE POMOCE (z logiki odległości) ---
-def _is_number(s):
-    try:
-        float(s)
-        return True
-    except Exception:
-        return False
-
+# --- WEKTORY I POMOCE GEOMETRYCZNE ---
+def _vec_add(a,b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
 def _vec_sub(a,b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
-def _vec_len(a): return math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2])
+def _vec_dot(a,b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+def _vec_cross(a,b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+def _vec_scale(a,s): return (a[0]*s, a[1]*s, a[2]*s)
+def _vec_len(a): return math.sqrt(_vec_dot(a,a))
+def _normalize(a):
+    L = _vec_len(a)
+    if L == 0: return (0.0,0.0,0.0)
+    return (a[0]/L, a[1]/L, a[2]/L)
 
-def find_best_face(obj, signature_file):
+# --- funkcja: cztery rogi prostokąta ograniczającego face (w globalnych współrzędnych) ---
+def build_plane_basis(normal):
+    gx = (1.0, 0.0, 0.0)
+    gy = (0.0, 1.0, 0.0)
+    dot_gx_n = _vec_dot(gx, normal)
+    u = _vec_sub(gx, _vec_scale(normal, dot_gx_n))
+    if _vec_len(u) < 1e-9:
+        dot_gy_n = _vec_dot(gy, normal)
+        u = _vec_sub(gy, _vec_scale(normal, dot_gy_n))
+        if _vec_len(u) < 1e-9:
+            if abs(normal[0]) < 0.9:
+                u = (0.0, -normal[2], normal[1])
+            else:
+                u = (-normal[1], normal[0], 0.0)
+    u = _normalize(u)
+    v = _normalize(_vec_cross(normal, u))
+    return u, v
+
+def project_point_to_plane_2d(p, origin, u, v):
+    rel = _vec_sub(p, origin)
+    return (_vec_dot(rel, u), _vec_dot(rel, v))
+
+def point2d_to_3d(pt2, origin, u, v):
+    return _vec_add(origin, _vec_add(_vec_scale(u, pt2[0]), _vec_scale(v, pt2[1])))
+
+def face_four_corners(face):
     """
-    Heurystyczne dopasowanie twarzy na podstawie zapisanego pliku (Area, CenterOfMass, NormalAt).
-    Zwraca indeks twarzy (0-based) lub None.
+    Zwraca listę 4 punktów (x,y,z) będących rogami bounding rectangle face w jego własnej płaszczyźnie.
+    Jeśli face ma dokładnie 4 wierzchołki, zwraca je w kolejności (unikalne).
     """
+    verts = []
+    try:
+        for v in face.Vertexes:
+            p = v.Point
+            tup = (float(p.x), float(p.y), float(p.z))
+            if tup not in verts:
+                verts.append(tup)
+    except Exception:
+        return []
+
+    if not verts:
+        return []
+
+    # jeśli face ma dokładnie 4 unikalne wierzchołki, zwróć je (stabilna kolejność nie gwarantowana, ale wartości są poprawne)
+    if len(verts) == 4:
+        return verts[:]
+
+    # origin: CenterOfMass jeśli dostępne, inaczej średnia wierzchołków
+    try:
+        cm = getattr(face, "CenterOfMass", None)
+        if cm is not None and hasattr(cm, "x"):
+            origin = (float(cm.x), float(cm.y), float(cm.z))
+        else:
+            sx = sy = sz = 0.0
+            for p in verts:
+                sx += p[0]; sy += p[1]; sz += p[2]
+            n = len(verts)
+            origin = (sx/n, sy/n, sz/n)
+    except Exception:
+        origin = verts[0]
+
+    # normala: preferuj face.normalAt(0,0)
+    try:
+        nvec = face.normalAt(0,0)
+        normal = (float(nvec.x), float(nvec.y), float(nvec.z)) if hasattr(nvec,'x') else tuple(nvec)
+    except Exception:
+        # fallback: normala z pierwszych trzech niekolinearnych wierzchołków
+        normal = (0.0,0.0,1.0)
+        if len(verts) >= 3:
+            a = _vec_sub(verts[1], verts[0])
+            b = _vec_sub(verts[2], verts[0])
+            c = _vec_cross(a,b)
+            if _vec_len(c) > 1e-12:
+                normal = _normalize(c)
+
+    normal = _normalize(normal)
+    u, v = build_plane_basis(normal)
+
+    pts2 = [project_point_to_plane_2d(p, origin, u, v) for p in verts]
+    us = [p[0] for p in pts2]; vs = [p[1] for p in pts2]
+    umin, umax = min(us), max(us)
+    vmin, vmax = min(vs), max(vs)
+    corners2 = [(umin, vmin), (umax, vmin), (umax, vmax), (umin, vmax)]
+    corners3 = [point2d_to_3d(c, origin, u, v) for c in corners2]
+    # zwróć jako listę krotek (x,y,z)
+    return [(float(p[0]), float(p[1]), float(p[2])) for p in corners3]
+
+# --- pomoc: sprawdź czy w 4 punktach jedna współrzędna jest stała (x/y/z) w tolerancji EPS_CONST ---
+def find_constant_coordinate(points, eps=EPS_CONST):
+    """
+    points: lista 4 punktów (x,y,z)
+    zwraca: (axis, value) gdzie axis in ('x','y','z') i value float,
+            lub (None, None) jeśli brak stałej współrzędnej
+    """
+    if not points or len(points) < 1:
+        return None, None
+    # sprawdź x, y, z
+    for idx, axis in enumerate(('x','y','z')):
+        vals = [p[idx] for p in points]
+        mn = min(vals); mx = max(vals)
+        if abs(mx - mn) <= eps:
+            return axis, sum(vals)/len(vals)
+    return None, None
+
+# --- heurystyka dopasowania twarzy (jak wcześniej) ---
+def find_best_face_index(obj, signature_file):
     sig = {}
     doc = FreeCAD.ActiveDocument
     path = os.path.join(os.path.dirname(doc.FileName), signature_file) if getattr(doc, "FileName", None) else None
@@ -147,11 +239,11 @@ def find_best_face(obj, signature_file):
                         except: pass
                     if line.startswith("CenterOfMass:"):
                         txt = line.split(":",1)[1].strip()
-                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if _is_number(s)]
+                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if s.replace('.','',1).lstrip('-').isdigit()]
                         if len(nums)>=3: sig['CenterOfMass'] = (float(nums[0]), float(nums[1]), float(nums[2]))
                     if line.startswith("NormalAt(0,0):"):
                         txt = line.split(":",1)[1].strip()
-                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if _is_number(s)]
+                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if s.replace('.','',1).lstrip('-').isdigit()]
                         if len(nums)>=3: sig['Normal'] = (float(nums[0]), float(nums[1]), float(nums[2]))
         except Exception:
             pass
@@ -179,15 +271,12 @@ def find_best_face(obj, signature_file):
             score += 1.0
         try:
             n = f.normalAt(0,0)
-            # normal może być wektorem FreeCAD Vector; zamieniamy na tuple
             n_t = (n.x, n.y, n.z) if hasattr(n, 'x') else tuple(n)
             if 'Normal' in sig:
-                nn = n_t
-                sn = sig['Normal']
-                ln = math.sqrt(nn[0]*nn[0]+nn[1]*nn[1]+nn[2]*nn[2]) if nn else 0.0
-                lsn = math.sqrt(sn[0]*sn[0]+sn[1]*sn[1]+sn[2]*sn[2]) if sn else 0.0
+                nn = n_t; sn = sig['Normal']
+                ln = _vec_len(nn); lsn = _vec_len(sn)
                 if ln>0 and lsn>0:
-                    dotp = abs((nn[0]/ln)*(sn[0]/lsn) + (nn[1]/ln)*(sn[1]/lsn) + (nn[2]/ln)*(sn[2]/lsn))
+                    dotp = abs(_vec_dot(nn, sn)/(ln*lsn))
                     score += (1.0 - dotp)
                 else:
                     score += 0.5
@@ -199,7 +288,7 @@ def find_best_face(obj, signature_file):
             best_score = score; best_idx = i
     return best_idx
 
-# --- GŁÓWNA METODA on_ok (dodana, bez tworzenia obiektów) ---
+# --- GŁÓWNA METODA on_ok: użycie narożników i różnicy stałej współrzędnej ---
 def _dialog_on_ok(self):
     try:
         doc = FreeCAD.ActiveDocument
@@ -231,8 +320,8 @@ def _dialog_on_ok(self):
             FreeCAD.Console.PrintError(">>> Nie znaleziono obiektu(y) w dokumencie: %s, %s\n" % (str(obj1name), str(obj2name)))
             self.accept(); return
 
-        idx1 = find_best_face(o1, FILE1)
-        idx2 = find_best_face(o2, FILE2)
+        idx1 = find_best_face_index(o1, FILE1)
+        idx2 = find_best_face_index(o2, FILE2)
         if idx1 is None or idx2 is None:
             FreeCAD.Console.PrintMessage(">>> Nie udało się zidentyfikować twarzy w obiektach.\n")
             self.accept(); return
@@ -244,40 +333,63 @@ def _dialog_on_ok(self):
             FreeCAD.Console.PrintError(">>> Błąd pobrania Face: %s\n" % str(e))
             self.accept(); return
 
-        # obliczenie minimalnej odległości 3D (distToShape)
-        try:
-            dist_info = f1.distToShape(f2)
-            dist = dist_info[0] if dist_info and len(dist_info) > 0 else None
-            if dist is None:
-                FreeCAD.Console.PrintError(">>> Nie udało się obliczyć odległości między twarzami.\n")
+        # pobierz 4 narożne punkty dla obu face
+        corners1 = face_four_corners(f1)
+        corners2 = face_four_corners(f2)
+        FreeCAD.Console.PrintMessage(">>> Face1 corners: %s\n" % (", ".join(["(%.6f, %.6f, %.6f)"%p for p in corners1]) if corners1 else "<none>"))
+        FreeCAD.Console.PrintMessage(">>> Face2 corners: %s\n" % (", ".join(["(%.6f, %.6f, %.6f)"%p for p in corners2]) if corners2 else "<none>"))
+
+        axis1, val1 = find_constant_coordinate(corners1, eps=EPS_CONST)
+        axis2, val2 = find_constant_coordinate(corners2, eps=EPS_CONST)
+
+        if axis1 is not None and axis2 is not None:
+            FreeCAD.Console.PrintMessage(">>> Face1 constant axis: %s = %.6f\n" % (axis1, val1))
+            FreeCAD.Console.PrintMessage(">>> Face2 constant axis: %s = %.6f\n" % (axis2, val2))
+            if axis1 == axis2:
+                dist = abs(val1 - val2)
+                FreeCAD.Console.PrintMessage(">>> Wynik (różnica stałych współrzędnych %s) = %.6f\n" % (axis1, dist))
             else:
-                FreeCAD.Console.PrintMessage(">>> Minimalna odległość 3D (distToShape) między wybranymi twarzami: %.6f\n" % dist)
-                # jeśli dostępne, wypisz punkty najbliższe (bez rysowania linii)
+                FreeCAD.Console.PrintMessage(">>> Stałe współrzędne różne (face1: %s, face2: %s). Nie można bezpośrednio odjąć.\n" % (str(axis1), str(axis2)))
+                # diagnostyka fallback
                 try:
-                    if len(dist_info) > 1 and dist_info[1] and len(dist_info[1]) >= 2:
-                        p1 = dist_info[1][0]
-                        p2 = dist_info[1][1]
-                        FreeCAD.Console.PrintMessage(">>> Punkt na Face1: (%.6f, %.6f, %.6f)\n" % (p1.x, p1.y, p1.z))
-                        FreeCAD.Console.PrintMessage(">>> Punkt na Face2: (%.6f, %.6f, %.6f)\n" % (p2.x, p2.y, p2.z))
+                    dinfo = f1.distToShape(f2)
+                    dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
+                    if dmin is not None:
+                        FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
                 except Exception:
                     pass
-        except Exception:
-            FreeCAD.Console.PrintError(">>> Błąd podczas wywołania distToShape:\n%s\n" % traceback.format_exc())
+        else:
+            FreeCAD.Console.PrintMessage(">>> Nie znaleziono stałej współrzędnej (x/y/z) we wszystkich 4 narożnikach jednego z face'ów.\n")
+            # diagnostyka: centroidy, normaly, distToShape
+            try:
+                cm1 = getattr(f1, "CenterOfMass", None)
+                cm2 = getattr(f2, "CenterOfMass", None)
+                if cm1 and hasattr(cm1,'x') and cm2 and hasattr(cm2,'x'):
+                    FreeCAD.Console.PrintMessage(">>> Centroid1: (%.6f, %.6f, %.6f)\n" % (cm1.x, cm1.y, cm1.z))
+                    FreeCAD.Console.PrintMessage(">>> Centroid2: (%.6f, %.6f, %.6f)\n" % (cm2.x, cm2.y, cm2.z))
+                try:
+                    dinfo = f1.distToShape(f2)
+                    dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
+                    if dmin is not None:
+                        FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     except Exception:
         FreeCAD.Console.PrintError(">>> Błąd w on_ok:\n%s\n" % traceback.format_exc())
     finally:
         self.accept()
 
-# --- DIALOG (oryginalny UI, jedynie podmienione połączenie OK na on_ok) ---
+# --- UI (oryginalne) ---
 class MyDialog(QtWidgets.QDialog):
     def __init__(self):
         super(MyDialog, self).__init__()
-        self.setWindowTitle("Makro diagnostyczne (Face1/Face2)")
+        self.setWindowTitle("Makro diagnostyczne (Face1/Face2) - stała współrzędna z narożników")
 
         layout = QtWidgets.QVBoxLayout()
 
-        # Wiersz 1
         self.btn1 = QtWidgets.QPushButton("Wybierz Face 1")
         self.label1 = QtWidgets.QLabel(read_object_label(FILE1))
         h1 = QtWidgets.QHBoxLayout()
@@ -285,7 +397,6 @@ class MyDialog(QtWidgets.QDialog):
         h1.addWidget(self.label1)
         layout.addLayout(h1)
 
-        # Wiersz 2
         self.btn2 = QtWidgets.QPushButton("Wybierz Face 2")
         self.label2 = QtWidgets.QLabel(read_object_label(FILE2))
         h2 = QtWidgets.QHBoxLayout()
@@ -293,43 +404,30 @@ class MyDialog(QtWidgets.QDialog):
         h2.addWidget(self.label2)
         layout.addLayout(h2)
 
-        # OK (zamienione na on_ok)
         self.okbtn = QtWidgets.QPushButton("OK")
         layout.addWidget(self.okbtn)
 
         self.setLayout(layout)
 
-        # Sygnały
         self.btn1.clicked.connect(lambda: self.startDiagnostic(FILE1, button_label="Wybierz Face 1"))
         self.btn2.clicked.connect(lambda: self.startDiagnostic(FILE2, button_label="Wybierz Face 2"))
-        # zamiast accept podłączamy on_ok (dodana metoda)
         self.okbtn.clicked.connect(self.on_ok)
 
-        # (opcjonalnie) komunikat przy uruchomieniu dialogu — odkomentuj jeśli chcesz
-        # try:
-        #     FreeCAD.Console.PrintMessage(">>> Makro gotowe. Użyj przycisków by wybrać face.\n")
-        # except Exception:
-        #     pass
-
     def startDiagnostic(self, filename, button_label=None):
-        # Wypisz krótką informację do Report view, żeby pozostała tam widoczna
         if button_label:
             try:
                 FreeCAD.Console.PrintMessage(f">>> {button_label}\n")
             except Exception:
                 pass
-
-        # Ukrywamy okno (by skupić się na widoku 3D) i uruchamiamy obserwator; po zapisie wracamy i odświeżamy labele
         self.hide()
         DiagnosticObserver(filename, onDone=self._returnAndRefresh)
 
     def _returnAndRefresh(self):
-        # Odśwież labele z plików i pokaż okno ponownie
         self.label1.setText(read_object_label(FILE1))
         self.label2.setText(read_object_label(FILE2))
         self.show()
 
-# Podłączamy metodę on_ok do klasy MyDialog
+# Podłączamy metodę on_ok
 MyDialog.on_ok = _dialog_on_ok
 
 # --- START ---
@@ -339,4 +437,5 @@ def run():
         currentDialog = MyDialog()
     currentDialog.show()
 
-run()
+if __name__ == "__main__":
+    run()
