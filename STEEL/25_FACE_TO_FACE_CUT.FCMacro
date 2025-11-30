@@ -1,6 +1,9 @@
+# -*- coding: utf-8 -*-
+# Face-to-Face: oryginalne UI + distToShape logic (console only)
+# Bazowane na Twoim 1.txt, rozszerzone o obliczenia z 2.txt (bez tworzenia geometrii)
 import FreeCAD, FreeCADGui
 from PySide2 import QtWidgets, QtCore
-import os
+import os, math, traceback
 
 # --- USTAWIENIA ---
 FILE1 = "face1_info.txt"
@@ -10,7 +13,7 @@ FILE2 = "face2_info.txt"
 currentObserver = None
 currentDialog = None
 
-# --- POMOCE ---
+# --- POMOCE (oryginalne) ---
 def get_model_dir():
     doc = FreeCAD.ActiveDocument
     if doc and getattr(doc, "FileName", None):
@@ -60,7 +63,7 @@ def read_object_label(filename):
             return "brak"
     return "brak"
 
-# --- OBSERWATOR ---
+# --- OBSERWATOR (oryginalny) ---
 class DiagnosticObserver:
     def __init__(self, targetFilename, onDone):
         global currentObserver
@@ -116,7 +119,157 @@ class DiagnosticObserver:
         if callable(self.onDone):
             QtCore.QTimer.singleShot(100, self.onDone)
 
-# --- DIALOG ---
+# --- DODATKOWE POMOCE (z logiki odległości) ---
+def _is_number(s):
+    try:
+        float(s)
+        return True
+    except Exception:
+        return False
+
+def _vec_sub(a,b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+def _vec_len(a): return math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2])
+
+def find_best_face(obj, signature_file):
+    """
+    Heurystyczne dopasowanie twarzy na podstawie zapisanego pliku (Area, CenterOfMass, NormalAt).
+    Zwraca indeks twarzy (0-based) lub None.
+    """
+    sig = {}
+    doc = FreeCAD.ActiveDocument
+    path = os.path.join(os.path.dirname(doc.FileName), signature_file) if getattr(doc, "FileName", None) else None
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("Area:"):
+                        try: sig['Area'] = float(line.split(":",1)[1].strip())
+                        except: pass
+                    if line.startswith("CenterOfMass:"):
+                        txt = line.split(":",1)[1].strip()
+                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if _is_number(s)]
+                        if len(nums)>=3: sig['CenterOfMass'] = (float(nums[0]), float(nums[1]), float(nums[2]))
+                    if line.startswith("NormalAt(0,0):"):
+                        txt = line.split(":",1)[1].strip()
+                        nums = [s for s in txt.replace("(", " ").replace(")", " ").replace(",", " ").split() if _is_number(s)]
+                        if len(nums)>=3: sig['Normal'] = (float(nums[0]), float(nums[1]), float(nums[2]))
+        except Exception:
+            pass
+    best_idx = None; best_score = 1e9
+    try:
+        faces = obj.Shape.Faces
+    except Exception:
+        return None
+    for i,f in enumerate(faces):
+        score = 0.0
+        try:
+            if 'Area' in sig and sig['Area']>0:
+                score += abs(f.Area - sig['Area'])/(sig['Area']+1e-12)
+            else:
+                score += 0.5
+        except Exception:
+            score += 1.0
+        try:
+            if 'CenterOfMass' in sig:
+                d = _vec_len(_vec_sub(f.CenterOfMass, sig['CenterOfMass']))
+                score += d/1e-3
+            else:
+                score += 0.5
+        except Exception:
+            score += 1.0
+        try:
+            n = f.normalAt(0,0)
+            # normal może być wektorem FreeCAD Vector; zamieniamy na tuple
+            n_t = (n.x, n.y, n.z) if hasattr(n, 'x') else tuple(n)
+            if 'Normal' in sig:
+                nn = n_t
+                sn = sig['Normal']
+                ln = math.sqrt(nn[0]*nn[0]+nn[1]*nn[1]+nn[2]*nn[2]) if nn else 0.0
+                lsn = math.sqrt(sn[0]*sn[0]+sn[1]*sn[1]+sn[2]*sn[2]) if sn else 0.0
+                if ln>0 and lsn>0:
+                    dotp = abs((nn[0]/ln)*(sn[0]/lsn) + (nn[1]/ln)*(sn[1]/lsn) + (nn[2]/ln)*(sn[2]/lsn))
+                    score += (1.0 - dotp)
+                else:
+                    score += 0.5
+            else:
+                score += 0.5
+        except Exception:
+            score += 1.0
+        if score < best_score:
+            best_score = score; best_idx = i
+    return best_idx
+
+# --- GŁÓWNA METODA on_ok (dodana, bez tworzenia obiektów) ---
+def _dialog_on_ok(self):
+    try:
+        doc = FreeCAD.ActiveDocument
+        if not doc:
+            FreeCAD.Console.PrintError(">>> Brak aktywnego dokumentu.\n")
+            self.accept(); return
+
+        def read_objname(fn):
+            path = os.path.join(os.path.dirname(doc.FileName), fn) if getattr(doc, "FileName", None) else None
+            if not path or not os.path.exists(path): return None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("Object:"):
+                            return line.split(":",1)[1].strip()
+            except Exception:
+                return None
+            return None
+
+        obj1name = read_objname(FILE1)
+        obj2name = read_objname(FILE2)
+        if not obj1name or not obj2name:
+            FreeCAD.Console.PrintMessage(">>> Brak zapisanych wyborów (face1/face2). Upewnij się, że wybrałeś obie twarze.\n")
+            self.accept(); return
+
+        o1 = doc.getObject(obj1name)
+        o2 = doc.getObject(obj2name)
+        if o1 is None or o2 is None:
+            FreeCAD.Console.PrintError(">>> Nie znaleziono obiektu(y) w dokumencie: %s, %s\n" % (str(obj1name), str(obj2name)))
+            self.accept(); return
+
+        idx1 = find_best_face(o1, FILE1)
+        idx2 = find_best_face(o2, FILE2)
+        if idx1 is None or idx2 is None:
+            FreeCAD.Console.PrintMessage(">>> Nie udało się zidentyfikować twarzy w obiektach.\n")
+            self.accept(); return
+
+        try:
+            f1 = o1.Shape.Faces[idx1]
+            f2 = o2.Shape.Faces[idx2]
+        except Exception as e:
+            FreeCAD.Console.PrintError(">>> Błąd pobrania Face: %s\n" % str(e))
+            self.accept(); return
+
+        # obliczenie minimalnej odległości 3D (distToShape)
+        try:
+            dist_info = f1.distToShape(f2)
+            dist = dist_info[0] if dist_info and len(dist_info) > 0 else None
+            if dist is None:
+                FreeCAD.Console.PrintError(">>> Nie udało się obliczyć odległości między twarzami.\n")
+            else:
+                FreeCAD.Console.PrintMessage(">>> Minimalna odległość 3D (distToShape) między wybranymi twarzami: %.6f\n" % dist)
+                # jeśli dostępne, wypisz punkty najbliższe (bez rysowania linii)
+                try:
+                    if len(dist_info) > 1 and dist_info[1] and len(dist_info[1]) >= 2:
+                        p1 = dist_info[1][0]
+                        p2 = dist_info[1][1]
+                        FreeCAD.Console.PrintMessage(">>> Punkt na Face1: (%.6f, %.6f, %.6f)\n" % (p1.x, p1.y, p1.z))
+                        FreeCAD.Console.PrintMessage(">>> Punkt na Face2: (%.6f, %.6f, %.6f)\n" % (p2.x, p2.y, p2.z))
+                except Exception:
+                    pass
+        except Exception:
+            FreeCAD.Console.PrintError(">>> Błąd podczas wywołania distToShape:\n%s\n" % traceback.format_exc())
+
+    except Exception:
+        FreeCAD.Console.PrintError(">>> Błąd w on_ok:\n%s\n" % traceback.format_exc())
+    finally:
+        self.accept()
+
+# --- DIALOG (oryginalny UI, jedynie podmienione połączenie OK na on_ok) ---
 class MyDialog(QtWidgets.QDialog):
     def __init__(self):
         super(MyDialog, self).__init__()
@@ -140,7 +293,7 @@ class MyDialog(QtWidgets.QDialog):
         h2.addWidget(self.label2)
         layout.addLayout(h2)
 
-        # OK (zamyka okno bez nasłuchu)
+        # OK (zamienione na on_ok)
         self.okbtn = QtWidgets.QPushButton("OK")
         layout.addWidget(self.okbtn)
 
@@ -149,7 +302,8 @@ class MyDialog(QtWidgets.QDialog):
         # Sygnały
         self.btn1.clicked.connect(lambda: self.startDiagnostic(FILE1, button_label="Wybierz Face 1"))
         self.btn2.clicked.connect(lambda: self.startDiagnostic(FILE2, button_label="Wybierz Face 2"))
-        self.okbtn.clicked.connect(self.accept)
+        # zamiast accept podłączamy on_ok (dodana metoda)
+        self.okbtn.clicked.connect(self.on_ok)
 
         # (opcjonalnie) komunikat przy uruchomieniu dialogu — odkomentuj jeśli chcesz
         # try:
@@ -174,6 +328,9 @@ class MyDialog(QtWidgets.QDialog):
         self.label1.setText(read_object_label(FILE1))
         self.label2.setText(read_object_label(FILE2))
         self.show()
+
+# Podłączamy metodę on_ok do klasy MyDialog
+MyDialog.on_ok = _dialog_on_ok
 
 # --- START ---
 def run():
