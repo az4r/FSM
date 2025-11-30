@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 # Face-to-Face: pomiar przez stałą współrzędną narożników (x/y/z)
-# Zasada: z każdego face pobieramy 4 punkty narożne (rogi bounding rectangle w płaszczyźnie face).
-# Jeśli wszystkie 4 punkty mają tę samą wartość jednej współrzędnej (x lub y lub z) w tolerancji,
-# to tę wartość zapamiętujemy. Wynik = abs(value_face1 - value_face2).
+# Zmiana: zapis SubElement (np. Face7) przy wyborze i bezpośrednie użycie tego identyfikatora
+#       przy odczycie, z heurystycznym fallbackem jeśli subelement nie jest dostępny.
 # Nie tworzymy żadnych obiektów w dokumencie; wszystko wypisujemy do Report view.
 import FreeCAD, FreeCADGui
 from PySide2 import QtWidgets, QtCore
@@ -17,7 +16,7 @@ EPS_CONST = 1e-6  # tolerancja porównania współrzędnych
 currentObserver = None
 currentDialog = None
 
-# --- POMOCE I/O (oryginalne) ---
+# --- POMOCE I/O ---
 def get_model_dir():
     doc = FreeCAD.ActiveDocument
     if doc and getattr(doc, "FileName", None):
@@ -30,9 +29,15 @@ def safe_str(v):
     except Exception:
         return "<unavailable>"
 
-def write_face_info(filepath, obj_name, face):
+def write_face_info(filepath, obj_name, face, subelement_name=None):
+    """
+    Zapisuje informacje o wyborze face do pliku. Dodatkowo zapisuje SubElement (np. Face7),
+    jeśli jest dostępny — to pozwoli na deterministyczne odczytanie tej samej twarzy później.
+    """
     lines = []
     lines.append(f"Object: {obj_name}")
+    if subelement_name:
+        lines.append(f"SubElement: {subelement_name}")
     lines.append(f"ShapeType: {safe_str(getattr(face, 'ShapeType', ''))}")
     lines.append(f"Area: {safe_str(getattr(face, 'Area', ''))}")
     lines.append(f"Volume: {safe_str(getattr(face, 'Volume', 0.0))}")
@@ -51,22 +56,35 @@ def write_face_info(filepath, obj_name, face):
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-def read_object_label(filename):
+def read_obj_and_subelement(fn):
+    """
+    Odczytuje z pliku Object i SubElement (jeśli zapisane).
+    Zwraca (object_name_or_None, subelement_or_None).
+    """
     doc = FreeCAD.ActiveDocument
     if not doc or not getattr(doc, "FileName", None):
-        return "brak"
-    filepath = os.path.join(os.path.dirname(doc.FileName), filename)
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.startswith("Object:"):
-                        return line.split(":", 1)[1].strip()
-        except Exception:
-            return "brak"
-    return "brak"
+        return None, None
+    path = os.path.join(os.path.dirname(doc.FileName), fn)
+    if not os.path.exists(path):
+        return None, None
+    objname = None; subelem = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Object:"):
+                    objname = line.split(":",1)[1].strip()
+                if line.startswith("SubElement:"):
+                    subelem = line.split(":",1)[1].strip()
+    except Exception:
+        return objname, subelem
+    return objname, subelem
 
-# --- OBSERWATOR (oryginalny) ---
+def read_object_label(filename):
+    # zachowujemy kompatybilność z UI (tylko nazwa obiektu)
+    name, _ = read_obj_and_subelement(filename)
+    return name if name else "brak"
+
+# --- OBSERWATOR (zapisuje SubElement) ---
 class DiagnosticObserver:
     def __init__(self, targetFilename, onDone):
         global currentObserver
@@ -85,16 +103,28 @@ class DiagnosticObserver:
             sel = FreeCADGui.Selection.getSelectionEx()
             if not sel or not sel[0].SubObjects:
                 return
-            face = sel[0].SubObjects[0]
+            sel0 = sel[0]
+            face = sel0.SubObjects[0]
             if getattr(face, "ShapeType", "") != "Face":
                 return
+            # spróbuj pobrać SubElementName (np. "Face7")
+            subelem = None
+            try:
+                s = getattr(sel0, "SubElementNames", None)
+                if s and len(s) > 0:
+                    subelem = s[0]
+            except Exception:
+                subelem = None
+
             model_dir = get_model_dir()
             filepath = os.path.join(model_dir, self.targetFilename)
-            write_face_info(filepath, obj_name, face)
+            write_face_info(filepath, obj_name, face, subelement_name=subelem)
+
             try:
                 FreeCAD.Console.PrintMessage(f">>> Dane zapisane do: {filepath}\n")
             except Exception:
                 pass
+
             self._finish()
         except Exception:
             self._finish()
@@ -121,7 +151,7 @@ def _normalize(a):
     if L == 0: return (0.0,0.0,0.0)
     return (a[0]/L, a[1]/L, a[2]/L)
 
-# --- funkcja: cztery rogi prostokąta ograniczającego face (w globalnych współrzędnych) ---
+# --- funkcje pomocnicze do narożników (stabilne) ---
 def build_plane_basis(normal):
     gx = (1.0, 0.0, 0.0)
     gy = (0.0, 1.0, 0.0)
@@ -148,8 +178,9 @@ def point2d_to_3d(pt2, origin, u, v):
 
 def face_four_corners(face):
     """
-    Zwraca listę 4 punktów (x,y,z) będących rogami bounding rectangle face w jego własnej płaszczyźnie.
-    Jeśli face ma dokładnie 4 wierzchołki, zwraca je w kolejności (unikalne).
+    Stabilna wersja:
+    - jeśli face ma dokładnie 4 unikalne wierzchołki, zwraca je (posortowane) w globalnych współrzędnych;
+    - w przeciwnym razie wykonuje fallback: projekcja na lokalną bazę płaszczyzny i bounding rectangle.
     """
     verts = []
     try:
@@ -164,11 +195,12 @@ def face_four_corners(face):
     if not verts:
         return []
 
-    # jeśli face ma dokładnie 4 unikalne wierzchołki, zwróć je (stabilna kolejność nie gwarantowana, ale wartości są poprawne)
+    # Jeśli mamy dokładnie 4 unikalne wierzchołki — użyj ich bez projekcji
     if len(verts) == 4:
-        return verts[:]
+        verts_sorted = sorted(verts, key=lambda p: (round(p[0],6), round(p[1],6), round(p[2],6)))
+        return verts_sorted
 
-    # origin: CenterOfMass jeśli dostępne, inaczej średnia wierzchołków
+    # fallback: projekcja (jak wcześniej)
     try:
         cm = getattr(face, "CenterOfMass", None)
         if cm is not None and hasattr(cm, "x"):
@@ -182,12 +214,10 @@ def face_four_corners(face):
     except Exception:
         origin = verts[0]
 
-    # normala: preferuj face.normalAt(0,0)
     try:
         nvec = face.normalAt(0,0)
         normal = (float(nvec.x), float(nvec.y), float(nvec.z)) if hasattr(nvec,'x') else tuple(nvec)
     except Exception:
-        # fallback: normala z pierwszych trzech niekolinearnych wierzchołków
         normal = (0.0,0.0,1.0)
         if len(verts) >= 3:
             a = _vec_sub(verts[1], verts[0])
@@ -205,19 +235,12 @@ def face_four_corners(face):
     vmin, vmax = min(vs), max(vs)
     corners2 = [(umin, vmin), (umax, vmin), (umax, vmax), (umin, vmax)]
     corners3 = [point2d_to_3d(c, origin, u, v) for c in corners2]
-    # zwróć jako listę krotek (x,y,z)
     return [(float(p[0]), float(p[1]), float(p[2])) for p in corners3]
 
-# --- pomoc: sprawdź czy w 4 punktach jedna współrzędna jest stała (x/y/z) w tolerancji EPS_CONST ---
+# --- pomoc: sprawdź czy w 4 punktach jedna współrzędna jest stała ---
 def find_constant_coordinate(points, eps=EPS_CONST):
-    """
-    points: lista 4 punktów (x,y,z)
-    zwraca: (axis, value) gdzie axis in ('x','y','z') i value float,
-            lub (None, None) jeśli brak stałej współrzędnej
-    """
     if not points or len(points) < 1:
         return None, None
-    # sprawdź x, y, z
     for idx, axis in enumerate(('x','y','z')):
         vals = [p[idx] for p in points]
         mn = min(vals); mx = max(vals)
@@ -225,7 +248,33 @@ def find_constant_coordinate(points, eps=EPS_CONST):
             return axis, sum(vals)/len(vals)
     return None, None
 
-# --- heurystyka dopasowania twarzy (jak wcześniej) ---
+# --- pomocnicze dla poprawki: porównanie punktów i centroid ---
+def points_almost_equal(a, b, eps=1e-6):
+    if not a or not b or len(a) != len(b): return False
+    def keyf(p): return (round(p[0],6), round(p[1],6), round(p[2],6))
+    sa = sorted(a, key=keyf)
+    sb = sorted(b, key=keyf)
+    for p,q in zip(sa,sb):
+        if abs(p[0]-q[0])>eps or abs(p[1]-q[1])>eps or abs(p[2]-q[2])>eps:
+            return False
+    return True
+
+def face_centroid_tuple(face, fallback_points=None):
+    try:
+        cm = getattr(face, "CenterOfMass", None)
+        if cm and hasattr(cm, "x"):
+            return (float(cm.x), float(cm.y), float(cm.z))
+    except Exception:
+        pass
+    if fallback_points:
+        sx = sy = sz = 0.0
+        for p in fallback_points:
+            sx += p[0]; sy += p[1]; sz += p[2]
+        n = len(fallback_points)
+        return (sx/n, sy/n, sz/n)
+    return (0.0,0.0,0.0)
+
+# --- heurystyka dopasowania twarzy (fallback) ---
 def find_best_face_index(obj, signature_file):
     sig = {}
     doc = FreeCAD.ActiveDocument
@@ -288,7 +337,29 @@ def find_best_face_index(obj, signature_file):
             best_score = score; best_idx = i
     return best_idx
 
-# --- GŁÓWNA METODA on_ok: użycie narożników i różnicy stałej współrzędnej ---
+# --- pomoc: pobierz face bezpośrednio z subelementu lub fallback ---
+def face_from_subelement(obj, subelem, fallback_index_func):
+    """
+    Jeśli subelem ma postać 'FaceN', zwraca obj.Shape.Faces[N-1] (jeśli istnieje).
+    W przeciwnym razie używa fallback_index_func(obj) by znaleźć indeks heurystycznie.
+    """
+    if obj is None:
+        return None
+    if subelem and isinstance(subelem, str) and subelem.lower().startswith("face"):
+        try:
+            idx = int(subelem[4:]) - 1
+            if idx >= 0 and idx < len(obj.Shape.Faces):
+                return obj.Shape.Faces[idx]
+        except Exception:
+            pass
+    # fallback heurystyczny
+    idx = fallback_index_func(obj)
+    try:
+        return obj.Shape.Faces[idx] if idx is not None else None
+    except Exception:
+        return None
+
+# --- GŁÓWNA METODA on_ok: użycie subelement + narożników i różnicy stałej współrzędnej ---
 def _dialog_on_ok(self):
     try:
         doc = FreeCAD.ActiveDocument
@@ -296,20 +367,8 @@ def _dialog_on_ok(self):
             FreeCAD.Console.PrintError(">>> Brak aktywnego dokumentu.\n")
             self.accept(); return
 
-        def read_objname(fn):
-            path = os.path.join(os.path.dirname(doc.FileName), fn) if getattr(doc, "FileName", None) else None
-            if not path or not os.path.exists(path): return None
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.startswith("Object:"):
-                            return line.split(":",1)[1].strip()
-            except Exception:
-                return None
-            return None
-
-        obj1name = read_objname(FILE1)
-        obj2name = read_objname(FILE2)
+        obj1name, sub1 = read_obj_and_subelement(FILE1)
+        obj2name, sub2 = read_obj_and_subelement(FILE2)
         if not obj1name or not obj2name:
             FreeCAD.Console.PrintMessage(">>> Brak zapisanych wyborów (face1/face2). Upewnij się, że wybrałeś obie twarze.\n")
             self.accept(); return
@@ -320,17 +379,11 @@ def _dialog_on_ok(self):
             FreeCAD.Console.PrintError(">>> Nie znaleziono obiektu(y) w dokumencie: %s, %s\n" % (str(obj1name), str(obj2name)))
             self.accept(); return
 
-        idx1 = find_best_face_index(o1, FILE1)
-        idx2 = find_best_face_index(o2, FILE2)
-        if idx1 is None or idx2 is None:
+        # pobierz facey: najpierw spróbuj użyć zapisanego SubElement, potem heurystyka
+        f1 = face_from_subelement(o1, sub1, lambda obj: find_best_face_index(obj, FILE1))
+        f2 = face_from_subelement(o2, sub2, lambda obj: find_best_face_index(obj, FILE2))
+        if f1 is None or f2 is None:
             FreeCAD.Console.PrintMessage(">>> Nie udało się zidentyfikować twarzy w obiektach.\n")
-            self.accept(); return
-
-        try:
-            f1 = o1.Shape.Faces[idx1]
-            f2 = o2.Shape.Faces[idx2]
-        except Exception as e:
-            FreeCAD.Console.PrintError(">>> Błąd pobrania Face: %s\n" % str(e))
             self.accept(); return
 
         # pobierz 4 narożne punkty dla obu face
@@ -342,51 +395,70 @@ def _dialog_on_ok(self):
         axis1, val1 = find_constant_coordinate(corners1, eps=EPS_CONST)
         axis2, val2 = find_constant_coordinate(corners2, eps=EPS_CONST)
 
-        if axis1 is not None and axis2 is not None:
-            FreeCAD.Console.PrintMessage(">>> Face1 constant axis: %s = %.6f\n" % (axis1, val1))
-            FreeCAD.Console.PrintMessage(">>> Face2 constant axis: %s = %.6f\n" % (axis2, val2))
-            if axis1 == axis2:
-                dist = abs(val1 - val2)
-                FreeCAD.Console.PrintMessage(">>> Wynik (różnica stałych współrzędnych %s) = %.6f\n" % (axis1, dist))
-            else:
-                FreeCAD.Console.PrintMessage(">>> Stałe współrzędne różne (face1: %s, face2: %s). Nie można bezpośrednio odjąć.\n" % (str(axis1), str(axis2)))
-                # diagnostyka fallback
+        # pobierz centroidy (globalne) do diagnostyki i poprawki
+        cent1 = face_centroid_tuple(f1, fallback_points=corners1)
+        cent2 = face_centroid_tuple(f2, fallback_points=corners2)
+
+        # jeśli narożniki praktycznie identyczne, ale centroidy różne -> użyj różnicy centroidów
+        if points_almost_equal(corners1, corners2, eps=1e-6):
+            chosen_axis = axis1 if axis1 is not None else (axis2 if axis2 is not None else None)
+            if chosen_axis is None:
                 try:
-                    dinfo = f1.distToShape(f2)
-                    dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
-                    if dmin is not None:
-                        FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
+                    nvec = f1.normalAt(0,0)
+                    n_abs = (abs(nvec.x), abs(nvec.y), abs(nvec.z))
+                    max_idx = 0 if n_abs[0] >= n_abs[1] and n_abs[0] >= n_abs[2] else (1 if n_abs[1] >= n_abs[2] else 2)
+                    chosen_axis = ('x','y','z')[max_idx]
                 except Exception:
-                    pass
+                    chosen_axis = 'z'
+            idx = {'x':0,'y':1,'z':2}[chosen_axis]
+            dist_centroids = abs(cent1[idx] - cent2[idx])
+            FreeCAD.Console.PrintMessage(">>> Uwaga: narożniki praktycznie identyczne — używam różnicy centroidów w osi %s = %.6f\n" % (chosen_axis, dist_centroids))
+            FreeCAD.Console.PrintMessage(">>> Face1 centroid: (%.6f, %.6f, %.6f)\n" % tuple(cent1))
+            FreeCAD.Console.PrintMessage(">>> Face2 centroid: (%.6f, %.6f, %.6f)\n" % tuple(cent2))
+            FreeCAD.Console.PrintMessage(">>> Wynik (z centroidów) = %.6f\n" % dist_centroids)
         else:
-            FreeCAD.Console.PrintMessage(">>> Nie znaleziono stałej współrzędnej (x/y/z) we wszystkich 4 narożnikach jednego z face'ów.\n")
-            # diagnostyka: centroidy, normaly, distToShape
-            try:
-                cm1 = getattr(f1, "CenterOfMass", None)
-                cm2 = getattr(f2, "CenterOfMass", None)
-                if cm1 and hasattr(cm1,'x') and cm2 and hasattr(cm2,'x'):
-                    FreeCAD.Console.PrintMessage(">>> Centroid1: (%.6f, %.6f, %.6f)\n" % (cm1.x, cm1.y, cm1.z))
-                    FreeCAD.Console.PrintMessage(">>> Centroid2: (%.6f, %.6f, %.6f)\n" % (cm2.x, cm2.y, cm2.z))
+            # normalna logika: jeśli obie mają stałą tę samą oś -> odejmij wartości
+            if axis1 is not None and axis2 is not None:
+                FreeCAD.Console.PrintMessage(">>> Face1 constant axis: %s = %.6f\n" % (axis1, val1))
+                FreeCAD.Console.PrintMessage(">>> Face2 constant axis: %s = %.6f\n" % (axis2, val2))
+                if axis1 == axis2:
+                    dist = abs(val1 - val2)
+                    FreeCAD.Console.PrintMessage(">>> Wynik (różnica stałych współrzędnych %s) = %.6f\n" % (axis1, dist))
+                else:
+                    FreeCAD.Console.PrintMessage(">>> Stałe współrzędne różne (face1: %s, face2: %s). Nie można bezpośrednio odjąć.\n" % (str(axis1), str(axis2)))
+                    try:
+                        dinfo = f1.distToShape(f2)
+                        dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
+                        if dmin is not None:
+                            FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
+                    except Exception:
+                        pass
+            else:
+                FreeCAD.Console.PrintMessage(">>> Nie znaleziono stałej współrzędnej (x/y/z) we wszystkich 4 narożnikach jednego z face'ów.\n")
                 try:
-                    dinfo = f1.distToShape(f2)
-                    dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
-                    if dmin is not None:
-                        FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
+                    if cent1 and cent2:
+                        FreeCAD.Console.PrintMessage(">>> Centroid1: (%.6f, %.6f, %.6f)\n" % tuple(cent1))
+                        FreeCAD.Console.PrintMessage(">>> Centroid2: (%.6f, %.6f, %.6f)\n" % tuple(cent2))
+                    try:
+                        dinfo = f1.distToShape(f2)
+                        dmin = dinfo[0] if dinfo and len(dinfo)>0 else None
+                        if dmin is not None:
+                            FreeCAD.Console.PrintMessage(">>> (Porównanie) distToShape = %.12f\n" % dmin)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-            except Exception:
-                pass
 
     except Exception:
         FreeCAD.Console.PrintError(">>> Błąd w on_ok:\n%s\n" % traceback.format_exc())
     finally:
         self.accept()
 
-# --- UI (oryginalne) ---
+# --- UI ---
 class MyDialog(QtWidgets.QDialog):
     def __init__(self):
         super(MyDialog, self).__init__()
-        self.setWindowTitle("Makro diagnostyczne (Face1/Face2) - stała współrzędna z narożników")
+        self.setWindowTitle("Makro diagnostyczne (Face1/Face2) - SubElement support")
 
         layout = QtWidgets.QVBoxLayout()
 
